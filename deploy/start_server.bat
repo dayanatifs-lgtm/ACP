@@ -7,6 +7,7 @@ setlocal
 cd /d "%~dp0.."
 
 if "%ACP_PORT%"=="" set "ACP_PORT=8088"
+if "%APP_BASE_URL%"=="" set "APP_BASE_URL=http://dse1thorftp1:%ACP_PORT%"
 
 if exist ".venv\Scripts\python.exe" (
   set "PY=.venv\Scripts\python.exe"

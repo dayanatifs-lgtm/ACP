@@ -851,10 +851,23 @@ def admin_unassign_set(email: str, set_id: int, request: Request) -> dict[str, A
     return detail
 
 
+def _request_public_base(request: Request) -> str:
+    """Prefer configured APP_BASE_URL; otherwise use the browser-facing host."""
+    configured = (auth_settings().base_url or "").strip().rstrip("/")
+    if configured and "127.0.0.1" not in configured and "localhost" not in configured.lower():
+        return configured
+    forwarded = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host = forwarded or (request.headers.get("host") or "").strip()
+    if not host:
+        return configured or "http://127.0.0.1:8766"
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    return f"{proto}://{host}".rstrip("/")
+
+
 @app.post("/api/auth/register")
-def auth_register(body: AuthEmailRequest) -> dict[str, Any]:
+def auth_register(body: AuthEmailRequest, request: Request) -> dict[str, Any]:
     try:
-        return auth_service.register(body.email)
+        return auth_service.register(body.email, public_base_url=_request_public_base(request))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -862,9 +875,11 @@ def auth_register(body: AuthEmailRequest) -> dict[str, Any]:
 
 
 @app.post("/api/auth/forgot-password")
-def auth_forgot(body: AuthEmailRequest) -> dict[str, Any]:
+def auth_forgot(body: AuthEmailRequest, request: Request) -> dict[str, Any]:
     try:
-        return auth_service.request_password_reset(body.email)
+        return auth_service.request_password_reset(
+            body.email, public_base_url=_request_public_base(request)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

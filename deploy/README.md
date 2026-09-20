@@ -61,6 +61,20 @@ This creates `.venv`, installs packages, and opens firewall TCP **8080**.
 
 Edit `C:\Apps\acp-importer\.env` and `environments.local.json` with the IFS / Jira / Gemini values this machine should use.
 
+For login emails to work, set at least:
+
+```
+APP_BASE_URL=http://dse1thorftp1:8088
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_USER=apikey
+SMTP_PASSWORD=<SendGrid API key>
+SMTP_FROM=<verified sender address>
+SMTP_USE_TLS=true
+```
+
+If SMTP is not set, registration still works: a one-time link is shown on the page (and saved under `logs\auth-links.log`). Without SMTP, users must open that link themselves.
+
 ACP folders referenced in the UI (for example `C:\UpdaClones` or `C:\newcode\...`) must exist **on this server**, or change the paths in the UI to server-local folders.
 
 ### Per-user package uploads (recommended for multi-user)

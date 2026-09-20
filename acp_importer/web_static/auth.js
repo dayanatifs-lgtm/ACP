@@ -47,6 +47,16 @@ const AuthPage = (() => {
     });
   }
 
+  function publicDebugLink(link) {
+    if (!link) return "";
+    try {
+      const parsed = new URL(link, window.location.origin);
+      return `${window.location.origin}${parsed.pathname}${parsed.search}`;
+    } catch {
+      return link;
+    }
+  }
+
   function bindRegister() {
     const form = document.getElementById("register-form");
     const error = document.getElementById("error");
@@ -62,7 +72,8 @@ const AuthPage = (() => {
           body: JSON.stringify({ email: document.getElementById("email").value.trim() }),
         });
         let text = result.message;
-        if (result.debug_link) text += ` Open: ${result.debug_link}`;
+        const link = publicDebugLink(result.debug_link);
+        if (link) text += ` Open this link to continue: ${link}`;
         show(message, text, false);
       } catch (e) {
         show(error, e.message, true);
@@ -85,7 +96,8 @@ const AuthPage = (() => {
           body: JSON.stringify({ email: document.getElementById("email").value.trim() }),
         });
         let text = result.message;
-        if (result.debug_link) text += ` Open: ${result.debug_link}`;
+        const link = publicDebugLink(result.debug_link);
+        if (link) text += ` Open this link to continue: ${link}`;
         show(message, text, false);
       } catch (e) {
         show(error, e.message, true);

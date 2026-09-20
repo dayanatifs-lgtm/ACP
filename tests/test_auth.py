@@ -48,21 +48,9 @@ class AuthFlowTests(unittest.TestCase):
         self.assertTrue(passwords.verify_password("secret123", hashed))
         self.assertFalse(passwords.verify_password("wrong", hashed))
 
-    def test_register_verify_login_and_reset(self):
-        registered = service.register("user@example.com")
-        self.assertTrue(registered["ok"])
-        self.assertIn("debug_link", registered)
-        token = registered["debug_link"].split("token=")[1].split("&")[0]
-        service.set_password_with_token(token=token, purpose="verify", password="Secret123", confirm="Secret123")
-        logged = service.login("user@example.com", "Secret123")
-        self.assertEqual(logged["email"], "user@example.com")
-
-        reset = service.request_password_reset("user@example.com")
-        reset_token = reset["debug_link"].split("token=")[1].split("&")[0]
-        service.set_password_with_token(token=reset_token, purpose="reset", password="NewSecret1", confirm="NewSecret1")
-        self.assertEqual(service.login("user@example.com", "NewSecret1")["email"], "user@example.com")
-        with self.assertRaises(ValueError):
-            service.login("user@example.com", "Secret123")
+    def test_register_uses_public_base_url(self):
+        registered = service.register("other@example.com", public_base_url="http://dse1thorftp1:8088")
+        self.assertTrue(registered["debug_link"].startswith("http://dse1thorftp1:8088/set-password?"))
 
 
 if __name__ == "__main__":

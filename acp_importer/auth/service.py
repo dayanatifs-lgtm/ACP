@@ -20,14 +20,21 @@ def _valid_email(email: str) -> str:
     return cleaned
 
 
-def register(email: str) -> dict[str, Any]:
+def _public_base(settings, public_base_url: str | None = None) -> str:
+    base = (public_base_url or "").strip().rstrip("/")
+    if base:
+        return base
+    return settings.base_url.rstrip("/")
+
+
+def register(email: str, *, public_base_url: str | None = None) -> dict[str, Any]:
     settings = auth_settings()
     if not settings.allow_signup and store.user_count() > 0:
         raise ValueError("Self-signup is disabled. Ask an administrator to invite you.")
     email = _valid_email(email)
     store.create_unverified_user(email)
     token = store.create_token(email, "verify", hours=24)
-    link = f"{settings.base_url}/set-password?token={token}&purpose=verify"
+    link = f"{_public_base(settings, public_base_url)}/set-password?token={token}&purpose=verify"
     delivery = send_email(
         settings,
         to_email=email,
@@ -54,7 +61,7 @@ def register(email: str) -> dict[str, Any]:
     return result
 
 
-def request_password_reset(email: str) -> dict[str, Any]:
+def request_password_reset(email: str, *, public_base_url: str | None = None) -> dict[str, Any]:
     settings = auth_settings()
     email = _valid_email(email)
     user = store.get_user(email)
@@ -67,7 +74,7 @@ def request_password_reset(email: str) -> dict[str, Any]:
     if not user or not user.get("is_verified") or not user.get("password_hash"):
         return generic
     token = store.create_token(email, "reset", hours=2)
-    link = f"{settings.base_url}/set-password?token={token}&purpose=reset"
+    link = f"{_public_base(settings, public_base_url)}/set-password?token={token}&purpose=reset"
     delivery = send_email(
         settings,
         to_email=email,
