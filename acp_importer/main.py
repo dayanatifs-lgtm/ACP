@@ -35,14 +35,19 @@ def main() -> int:
     configure_logging(args.verbose)
 
     try:
-        settings = Settings.from_environment()
+        settings = Settings.from_environment(require_auth=not args.dry_run)
     except ValueError as exc:
         logging.error("Configuration error: %s", exc)
         return 2
     folder = args.folder or settings.acp_folder
-    packages = sorted(path for path in folder.glob("*.acp") if path.is_file())
+    # The original requirement used .acp examples, while the captured IFS upload
+    # is a .zip file. IFS ACP exports are commonly delivered as ZIP archives.
+    packages = sorted(
+        path for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in {".acp", ".zip"}
+    )
     if not packages:
-        logging.warning("No .acp files found in %s", folder)
+        logging.warning("No .acp or .zip files found in %s", folder)
         return 0
 
     client = IfsAcpClient(settings)

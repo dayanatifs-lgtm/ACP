@@ -37,9 +37,10 @@ class Settings:
     request_timeout_seconds: float
     verify_tls: bool
     xsrf_token: str | None
+    use_env_proxy: bool
 
     @classmethod
-    def from_environment(cls) -> "Settings":
+    def from_environment(cls, *, require_auth: bool = True) -> "Settings":
         load_dotenv()
         grant_type = os.getenv("IFS_GRANT_TYPE", "client_credentials").strip()
         if grant_type not in {"client_credentials", "password"}:
@@ -49,10 +50,10 @@ class Settings:
         if grant_type == "password" and (not username or not password):
             raise ValueError("IFS_USERNAME and IFS_PASSWORD are required for password grant")
         return cls(
-            base_url=_required("IFS_BASE_URL").rstrip("/"),
-            token_url=_required("IFS_TOKEN_URL"),
-            client_id=_required("IFS_CLIENT_ID"),
-            client_secret=_required("IFS_CLIENT_SECRET"),
+            base_url=(_required("IFS_BASE_URL") if require_auth else os.getenv("IFS_BASE_URL", "")).rstrip("/"),
+            token_url=_required("IFS_TOKEN_URL") if require_auth else os.getenv("IFS_TOKEN_URL", ""),
+            client_id=_required("IFS_CLIENT_ID") if require_auth else os.getenv("IFS_CLIENT_ID", ""),
+            client_secret=_required("IFS_CLIENT_SECRET") if require_auth else os.getenv("IFS_CLIENT_SECRET", ""),
             grant_type=grant_type,
             token_client_auth=os.getenv("IFS_TOKEN_CLIENT_AUTH", "basic").strip().lower(),
             scope=os.getenv("IFS_SCOPE", "").strip() or None,
@@ -64,4 +65,5 @@ class Settings:
             request_timeout_seconds=float(os.getenv("IFS_REQUEST_TIMEOUT_SECONDS", "60")),
             verify_tls=_as_bool(os.getenv("IFS_VERIFY_TLS", "true")),
             xsrf_token=os.getenv("IFS_XSRF_TOKEN", "").strip() or None,
+            use_env_proxy=_as_bool(os.getenv("IFS_USE_ENV_PROXY", "false")),
         )

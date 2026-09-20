@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Sign in · ACP Importer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="/assets/styles.css?v=19"/>
+</head>
+<body class="auth-body auth-body-v2">
+  <div class="auth-glow auth-glow-tl" aria-hidden="true"></div>
+  <div class="auth-glow auth-glow-br" aria-hidden="true"></div>
+  <main class="auth-shell">
+    <section class="auth-card-v2">
+      <div class="brand-mark auth-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="28" height="28" fill="none">
+          <ellipse cx="24" cy="12" rx="14" ry="5.5" stroke="#fff" stroke-width="2.2"/>
+          <path d="M10 12v8c0 3 6.3 5.5 14 5.5s14-2.5 14-5.5v-8" stroke="#fff" stroke-width="2.2"/>
+          <path d="M10 20v8c0 3 6.3 5.5 14 5.5s14-2.5 14-5.5v-8" stroke="#fff" stroke-width="2.2"/>
+          <path d="M10 28v8c0 3 6.3 5.5 14 5.5s14-2.5 14-5.5v-8" stroke="#fff" stroke-width="2.2"/>
+        </svg>
+      </div>
+      <h1 class="auth-brand">ACP IMPORTER</h1>
+      <p class="auth-lead">Sign in to your account</p>
+      <form id="login-form" class="auth-form-v2">
+        <label>
+          <span>Email</span>
+          <input id="email" type="email" required autocomplete="username" placeholder="you@company.com"/>
+        </label>
+        <label>
+          <span>Password</span>
+          <div class="password-field">
+            <input id="password" type="password" required autocomplete="current-password" placeholder="••••••••"/>
+            <button type="button" class="password-toggle" id="toggle-password" aria-label="Show password">
+              <svg class="icon-eye" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+        </label>
+        <p id="error" class="error" hidden></p>
+        <button class="auth-submit" type="submit">Sign In</button>
+      </form>
+      <p class="auth-links-v2"><a href="/forgot-password">Reset password</a></p>
+      <p class="auth-links-v2 muted"><a href="/register">Create account</a></p>
+      <p class="auth-copy">© 2026 ACP IMPORTER — All rights reserved</p>
+    </section>
+  </main>
+  <script src="/assets/auth.js?v=4"></script>
+  <script>
+    AuthPage.bindLogin();
+    AuthPage.bindPasswordToggle("password", "toggle-password");
+  </script>
+</body>
+</html>
