@@ -87,7 +87,7 @@ function render() {
       <header>
         <p class="eyebrow">ADMINISTRATION</p>
         <h1>Permission Sets</h1>
-        <p class="subtitle">Create sets of page and function access, then assign them to users.</p>
+        <p class="subtitle">Create sets of page and function access, then assign them to users. An active set named <strong>Default</strong> is granted automatically to users who have no sets yet (first login / first page load).</p>
       </header>
       ${message ? `<p class="success">${esc(message)}</p>` : ""}
       ${error ? `<p class="error">${esc(error)}</p>` : ""}

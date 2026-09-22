@@ -14,6 +14,7 @@ from .store import _db, init_db, normalize_email
 
 
 FULL_ACCESS_SET_NAME = "Full Access"
+DEFAULT_PERMISSION_SET_NAME = "Default"
 
 
 def init_permissions_schema(db_path: Path | None = None) -> None:
@@ -225,6 +226,56 @@ def ensure_bootstrap_admin(email: str, db_path: Path | None = None) -> None:
             entity_id=str(user["id"]),
             detail={"email": email, "reason": "first_verified_user"},
         )
+
+
+def ensure_default_permissions(email: str, db_path: Path | None = None) -> bool:
+    """Assign the active 'Default' set when the user has no permission sets yet.
+
+    Returns True if Default was assigned (or already present after ensure).
+    """
+    init_permissions_schema(db_path)
+    email = normalize_email(email)
+    user = store.get_user(email, db_path)
+    if not user or not user.get("is_verified"):
+        return False
+    now = time.time()
+    with _db(db_path) as conn:
+        assigned = conn.execute(
+            "SELECT COUNT(*) AS c FROM user_permission_sets WHERE user_id = ?",
+            (user["id"],),
+        ).fetchone()
+        if assigned and int(assigned["c"] or 0) > 0:
+            return False
+        default_row = conn.execute(
+            """
+            SELECT id FROM permission_sets
+            WHERE name = ? COLLATE NOCASE AND is_active = 1
+            """,
+            (DEFAULT_PERMISSION_SET_NAME,),
+        ).fetchone()
+        if not default_row:
+            return False
+        set_id = int(default_row["id"])
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_permission_sets (user_id, permission_set_id, assigned_at, assigned_by)
+            VALUES (?, ?, ?, 'system')
+            """,
+            (user["id"], set_id, now),
+        )
+        _audit(
+            conn,
+            actor_email="system",
+            action="assign",
+            entity_type="user_permission_set",
+            entity_id=f"{user['id']}:{set_id}",
+            detail={
+                "email": email,
+                "permission_set_id": set_id,
+                "reason": "default_on_first_access",
+            },
+        )
+        return True
 
 
 def list_permission_sets(db_path: Path | None = None) -> list[dict[str, Any]]:

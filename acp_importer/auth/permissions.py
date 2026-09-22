@@ -7,13 +7,18 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from .permissions_catalog import page_key_for_path
-from .permissions_store import effective_grants_for_email, init_permissions_schema
+from .permissions_store import (
+    effective_grants_for_email,
+    ensure_default_permissions,
+    init_permissions_schema,
+)
 from .settings import auth_enabled
 from .sessions import current_user
 
 
 def load_user_permissions(email: str) -> dict[str, Any]:
     init_permissions_schema()
+    ensure_default_permissions(email)
     return effective_grants_for_email(email)
 
 

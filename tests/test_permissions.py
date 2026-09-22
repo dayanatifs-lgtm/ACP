@@ -102,6 +102,27 @@ class PermissionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ps.delete_permission_set(full["id"], db_path=self.db)
 
+    def test_default_set_assigned_when_user_has_none(self) -> None:
+        self._create_user("new@example.com")
+        user = store.get_user("new@example.com", self.db)
+        with store._db(self.db) as conn:
+            conn.execute("DELETE FROM user_permission_sets WHERE user_id = ?", (user["id"],))
+
+        default = ps.create_permission_set(
+            name="Default",
+            grants=[
+                {"pageKey": "dashboard", "functionKey": "view"},
+                {"pageKey": "clone", "functionKey": "view"},
+            ],
+            db_path=self.db,
+        )
+        assigned = ps.ensure_default_permissions("new@example.com", self.db)
+        self.assertTrue(assigned)
+        detail = ps.get_user_permission_detail("new@example.com", self.db)
+        self.assertEqual([s["id"] for s in detail["permissionSets"]], [default["id"]])
+        # Second call does nothing once a set is present
+        self.assertFalse(ps.ensure_default_permissions("new@example.com", self.db))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -109,9 +109,10 @@ def set_password_with_token(*, token: str, purpose: str, password: str, confirm:
         raise ValueError("Unknown account")
     store.set_password(email, password_hash, mark_verified=True)
     if purpose == "verify":
-        from .permissions_store import ensure_bootstrap_admin
+        from .permissions_store import ensure_bootstrap_admin, ensure_default_permissions
 
         ensure_bootstrap_admin(email)
+        ensure_default_permissions(email)
     return {
         "ok": True,
         "email": email,
@@ -126,6 +127,9 @@ def login(email: str, password: str) -> dict[str, Any]:
         raise ValueError("Invalid email or password")
     if not verify_password(password, str(user["password_hash"])):
         raise ValueError("Invalid email or password")
+    from .permissions_store import ensure_default_permissions
+
+    ensure_default_permissions(email)
     return {"ok": True, "email": email}
 
 
