@@ -66,12 +66,14 @@ from .run_sessions import ImportRun, sessions
 from .db_sync import (
     OracleEndpoint,
     compare_tables,
+    ensure_thick_mode,
     get_status as db_sync_status,
     list_schemas as db_list_schemas,
     list_tables as db_list_tables,
     request_stop as db_sync_stop,
     start_sync as db_sync_start,
     test_connection as db_test_connection,
+    thick_status as db_thick_status,
 )
 from .workspaces import (
     WORKSPACE_TOKEN,
@@ -181,6 +183,7 @@ class OracleEndpointRequest(BaseModel):
     user: str
     password: str = ""
     connectAs: str = "service"
+    thick: bool = False
 
 
 class DbSyncEndpointBody(BaseModel):
@@ -1393,7 +1396,23 @@ def _oracle_endpoint(body: OracleEndpointRequest) -> OracleEndpoint:
         user=body.user,
         password=body.password,
         connect_as=body.connectAs or "service",
+        thick=bool(body.thick),
     )
+
+
+@app.get("/api/db-sync/thick")
+def api_db_sync_thick_status() -> dict[str, Any]:
+    return db_thick_status()
+
+
+@app.post("/api/db-sync/thick")
+def api_db_sync_thick_enable() -> dict[str, Any]:
+    try:
+        return ensure_thick_mode()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/db-sync/status")

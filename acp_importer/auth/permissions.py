@@ -150,7 +150,7 @@ def resolve_api_requirement(method: str, path: str) -> tuple[str, str] | None:
         return ("db_sync", "sync")
     if path == "/api/db-sync/stop":
         return ("db_sync", "sync")
-    if path == "/api/db-sync/status":
+    if path == "/api/db-sync/status" or path == "/api/db-sync/thick":
         return ("db_sync", "view")
     if path.startswith("/api/db-sync"):
         return ("db_sync", "view")

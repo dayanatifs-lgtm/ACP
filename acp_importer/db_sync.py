@@ -6,19 +6,27 @@ Not OS Data Pump (expdp/impdp). Uses python-oracledb to:
 3) copy rows in FK-aware order where possible
 
 Passwords are never written to disk by this module.
+
+Many IFS Oracle listeners use Native Network Encryption. Thin mode then fails
+with DPY-4011/DPY-6005; enable thick mode (Oracle Instant Client) for those DBs.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 LOG = logging.getLogger("DbSync")
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
+
+_thick_lock = threading.Lock()
+_thick_state: dict[str, Any] = {"attempted": False, "enabled": False, "lib_dir": None, "error": None}
 
 
 @dataclass
@@ -29,6 +37,7 @@ class OracleEndpoint:
     user: str = ""
     password: str = ""
     connect_as: str = "service"  # "service" | "sid"
+    thick: bool = False
 
     def connect_mode(self) -> str:
         mode = (self.connect_as or "service").strip().lower()
@@ -74,7 +83,13 @@ def _job(owner: str | None) -> SyncJob:
 def get_status(owner: str | None) -> dict[str, Any]:
     job = _job(owner)
     with _lock:
-        return asdict(job)
+        status = asdict(job)
+    status["thick"] = {
+        "enabled": bool(_thick_state["enabled"]),
+        "libDir": _thick_state["lib_dir"],
+        "error": _thick_state["error"],
+    }
+    return status
 
 
 def request_stop(owner: str | None) -> None:
@@ -96,6 +111,99 @@ def _require_oracledb():
     return oracledb
 
 
+def _candidate_client_dirs() -> list[str]:
+    dirs: list[str] = []
+    for key in ("ORACLE_CLIENT_LIB_DIR", "ORACLE_HOME"):
+        value = (os.environ.get(key) or "").strip().strip('"')
+        if value:
+            dirs.append(value)
+            bin_dir = str(Path(value) / "bin")
+            if bin_dir not in dirs:
+                dirs.append(bin_dir)
+
+    for base in (Path(r"C:\oracle"), Path(r"C:\Oracle"), Path(r"D:\oracle"), Path(r"C:\app")):
+        if not base.exists():
+            continue
+        try:
+            for match in base.rglob("oci.dll"):
+                dirs.append(str(match.parent))
+        except Exception:
+            LOG.debug("Could not scan %s for Instant Client", base, exc_info=True)
+
+    for part in (os.environ.get("PATH") or "").split(os.pathsep):
+        part = part.strip().strip('"')
+        if not part:
+            continue
+        if (Path(part) / "oci.dll").exists() or (Path(part) / "libclntsh.so").exists():
+            dirs.append(part)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in dirs:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def ensure_thick_mode(lib_dir: str | None = None) -> dict[str, Any]:
+    """Initialize Oracle Instant Client (thick mode) once per process."""
+    oracledb = _require_oracledb()
+    with _thick_lock:
+        if _thick_state["enabled"]:
+            return {"ok": True, "libDir": _thick_state["lib_dir"], "already": True}
+        candidates: list[str] = []
+        if lib_dir and lib_dir.strip():
+            candidates.append(lib_dir.strip())
+        candidates.extend(_candidate_client_dirs())
+        candidates.append("")  # empty = PATH / default search
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                kwargs: dict[str, Any] = {}
+                if candidate:
+                    kwargs["lib_dir"] = candidate
+                oracledb.init_oracle_client(**kwargs)
+                _thick_state["attempted"] = True
+                _thick_state["enabled"] = True
+                _thick_state["lib_dir"] = candidate or "(PATH/default)"
+                _thick_state["error"] = None
+                LOG.info("Oracle thick mode enabled via %s", _thick_state["lib_dir"])
+                return {"ok": True, "libDir": _thick_state["lib_dir"]}
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already been initialized" in msg or "dpi-1012" in msg:
+                    _thick_state["attempted"] = True
+                    _thick_state["enabled"] = True
+                    _thick_state["lib_dir"] = candidate or _thick_state["lib_dir"] or "(PATH/default)"
+                    _thick_state["error"] = None
+                    return {"ok": True, "libDir": _thick_state["lib_dir"], "already": True}
+                last_error = exc
+                continue
+
+        _thick_state["attempted"] = True
+        _thick_state["enabled"] = False
+        _thick_state["error"] = str(last_error) if last_error else "Instant Client not found"
+        raise ValueError(
+            "Thick mode failed: Oracle Instant Client not found. "
+            "Install Instant Client on the app server and set ORACLE_CLIENT_LIB_DIR "
+            "to the folder that contains oci.dll, then restart the app. "
+            f"Detail: {_thick_state['error']}"
+        )
+
+
+def thick_status() -> dict[str, Any]:
+    return {
+        "enabled": bool(_thick_state["enabled"]),
+        "libDir": _thick_state["lib_dir"],
+        "error": _thick_state["error"],
+        "candidates": _candidate_client_dirs()[:8],
+    }
+
+
 def _quote_ident(name: str) -> str:
     text = (name or "").strip()
     if not text or not IDENTIFIER_RE.match(text):
@@ -105,6 +213,8 @@ def _quote_ident(name: str) -> str:
 
 def _connect(endpoint: OracleEndpoint):
     oracledb = _require_oracledb()
+    if endpoint.thick:
+        ensure_thick_mode()
     if not (endpoint.user or "").strip() or endpoint.password is None:
         raise ValueError("Username and password are required")
     kwargs: dict[str, Any] = {
@@ -129,11 +239,17 @@ def _friendly_connect_error(exc: Exception, endpoint: OracleEndpoint) -> str:
     mode = endpoint.connect_mode()
     other = "SID" if mode == "service" else "service name"
     hints = [
-        f"Tried connect as {mode} to {endpoint.host}:{endpoint.port or 1521} / {endpoint.service}.",
+        f"Tried connect as {mode} to {endpoint.host}:{endpoint.port or 1521} / {endpoint.service}"
+        + (" (thick mode)" if endpoint.thick else " (thin mode)")
+        + ".",
         f"If this keeps failing, switch Connect as to {other}.",
         "Confirm the app server can reach the DB host on TCP 1521.",
-        "If the DB uses Native Network Encryption, thick-mode Oracle Instant Client may be required.",
     ]
+    if not endpoint.thick and ("DPY-4011" in text or "DPY-6005" in text or "DPY-3001" in text):
+        hints.append(
+            "This pattern often means Native Network Encryption — tick "
+            "'Use Oracle Instant Client (thick mode)' and install Instant Client on the server."
+        )
     return f"{text} — {' '.join(hints)}"
 
 
@@ -157,6 +273,8 @@ def test_connection(endpoint: OracleEndpoint) -> dict[str, Any]:
                 "serviceName": row[2],
                 "dsn": endpoint.dsn(),
                 "connectAs": endpoint.connect_mode(),
+                "thick": bool(endpoint.thick and _thick_state["enabled"]),
+                "thickLibDir": _thick_state["lib_dir"],
             }
     except Exception as exc:
         raise ValueError(_friendly_connect_error(exc, endpoint)) from exc

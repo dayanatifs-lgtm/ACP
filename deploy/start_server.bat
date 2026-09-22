@@ -8,6 +8,9 @@ cd /d "%~dp0.."
 
 if "%ACP_PORT%"=="" set "ACP_PORT=8088"
 if "%APP_BASE_URL%"=="" set "APP_BASE_URL=http://dse1thorftp1:%ACP_PORT%"
+REM Optional for DB Sync against encrypted Oracle listeners:
+REM   set ORACLE_CLIENT_LIB_DIR=C:\oracle\instantclient_21_13
+REM (folder that contains oci.dll)
 
 if exist ".venv\Scripts\python.exe" (
   set "PY=.venv\Scripts\python.exe"

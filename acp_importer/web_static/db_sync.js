@@ -19,6 +19,7 @@ const form = {
   targetConnectAs: "sid",
   targetUser: "",
   targetPassword: "",
+  thick: true,
   schema: "",
   addMissingColumns: true,
   replaceData: false,
@@ -52,6 +53,7 @@ function endpoint(prefix) {
     user: form[`${prefix}User`],
     password: form[`${prefix}Password`],
     connectAs: form[`${prefix}ConnectAs`] || "service",
+    thick: !!form.thick,
   };
 }
 
@@ -70,6 +72,7 @@ function readForm() {
   form.targetConnectAs = get("tgt-connect-as") || "service";
   form.targetUser = get("tgt-user").trim();
   form.targetPassword = get("tgt-password");
+  form.thick = checked("opt-thick");
   form.schema = get("schema").trim();
   form.addMissingColumns = checked("opt-add-cols");
   form.replaceData = checked("opt-replace");
@@ -149,9 +152,14 @@ function render() {
       <h1>DB Sync</h1>
       <p class="subtitle">Compare source/target tables, optionally add missing columns on DEV, then copy rows in FK-aware order. Passwords stay in memory only (not saved).</p>
     </header>
-    <p class="help">This is a logical sync (python-oracledb), not OS Data Pump. Tables that do not exist on DEV must be created first. Prefer a small table list before full schema copy.</p>
+    <p class="help">This is a logical sync (python-oracledb), not OS Data Pump. Tables that do not exist on DEV must be created first. Prefer a small table list before full schema copy. DPY-4011 usually means Native Network Encryption — keep thick mode on and install Oracle Instant Client on the app server.</p>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}
     ${info ? `<p class="success">${esc(info)}</p>` : ""}
+    <section class="card settings">
+      <h2>Client mode</h2>
+      <label class="check-row"><input id="opt-thick" type="checkbox" ${form.thick ? "checked" : ""}/> Use Oracle Instant Client (thick mode) — required when DB uses network encryption</label>
+      <p class="help">Set server env <code>ORACLE_CLIENT_LIB_DIR</code> to the folder with <code>oci.dll</code>, then restart. Current: ${esc((status.thick && status.thick.libDir) || "not initialized")}${status.thick && status.thick.error ? ` — ${esc(status.thick.error)}` : ""}</p>
+    </section>
     <div class="db-sync-endpoints">
       ${endpointFields("src", "Source (CFG)")}
       ${endpointFields("tgt", "Target (DEV)")}
