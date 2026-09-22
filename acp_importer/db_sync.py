@@ -28,13 +28,23 @@ class OracleEndpoint:
     service: str = ""
     user: str = ""
     password: str = ""
+    connect_as: str = "service"  # "service" | "sid"
 
-    def dsn(self) -> str:
+    def connect_mode(self) -> str:
+        mode = (self.connect_as or "service").strip().lower()
+        return "sid" if mode == "sid" else "service"
+
+    def dsn(self, oracledb_mod: Any | None = None) -> str:
         host = (self.host or "").strip()
         service = (self.service or "").strip()
         if not host or not service:
             raise ValueError("Host and service/SID are required")
-        return f"{host}:{int(self.port or 1521)}/{service}"
+        port = int(self.port or 1521)
+        if oracledb_mod is None:
+            oracledb_mod = _require_oracledb()
+        if self.connect_mode() == "sid":
+            return oracledb_mod.makedsn(host, port, sid=service)
+        return oracledb_mod.makedsn(host, port, service_name=service)
 
 
 @dataclass
@@ -97,32 +107,59 @@ def _connect(endpoint: OracleEndpoint):
     oracledb = _require_oracledb()
     if not (endpoint.user or "").strip() or endpoint.password is None:
         raise ValueError("Username and password are required")
-    return oracledb.connect(
-        user=endpoint.user.strip(),
-        password=endpoint.password,
-        dsn=endpoint.dsn(),
-    )
+    kwargs: dict[str, Any] = {
+        "user": endpoint.user.strip(),
+        "password": endpoint.password,
+        "host": (endpoint.host or "").strip(),
+        "port": int(endpoint.port or 1521),
+        "disable_oob": True,
+    }
+    name = (endpoint.service or "").strip()
+    if not kwargs["host"] or not name:
+        raise ValueError("Host and service/SID are required")
+    if endpoint.connect_mode() == "sid":
+        kwargs["sid"] = name
+    else:
+        kwargs["service_name"] = name
+    return oracledb.connect(**kwargs)
+
+
+def _friendly_connect_error(exc: Exception, endpoint: OracleEndpoint) -> str:
+    text = str(exc)
+    mode = endpoint.connect_mode()
+    other = "SID" if mode == "service" else "service name"
+    hints = [
+        f"Tried connect as {mode} to {endpoint.host}:{endpoint.port or 1521} / {endpoint.service}.",
+        f"If this keeps failing, switch Connect as to {other}.",
+        "Confirm the app server can reach the DB host on TCP 1521.",
+        "If the DB uses Native Network Encryption, thick-mode Oracle Instant Client may be required.",
+    ]
+    return f"{text} — {' '.join(hints)}"
 
 
 def test_connection(endpoint: OracleEndpoint) -> dict[str, Any]:
-    with _connect(endpoint) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            select sys_context('USERENV','SESSION_USER') as session_user,
-                   sys_context('USERENV','DB_NAME') as db_name,
-                   sys_context('USERENV','SERVICE_NAME') as service_name
-            from dual
-            """
-        )
-        row = cur.fetchone()
-        return {
-            "ok": True,
-            "sessionUser": row[0],
-            "dbName": row[1],
-            "serviceName": row[2],
-            "dsn": endpoint.dsn(),
-        }
+    try:
+        with _connect(endpoint) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                select sys_context('USERENV','SESSION_USER') as session_user,
+                       sys_context('USERENV','DB_NAME') as db_name,
+                       sys_context('USERENV','SERVICE_NAME') as service_name
+                from dual
+                """
+            )
+            row = cur.fetchone()
+            return {
+                "ok": True,
+                "sessionUser": row[0],
+                "dbName": row[1],
+                "serviceName": row[2],
+                "dsn": endpoint.dsn(),
+                "connectAs": endpoint.connect_mode(),
+            }
+    except Exception as exc:
+        raise ValueError(_friendly_connect_error(exc, endpoint)) from exc
 
 
 def list_schemas(endpoint: OracleEndpoint) -> list[str]:

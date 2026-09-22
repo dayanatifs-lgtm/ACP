@@ -180,6 +180,7 @@ class OracleEndpointRequest(BaseModel):
     service: str
     user: str
     password: str = ""
+    connectAs: str = "service"
 
 
 class DbSyncEndpointBody(BaseModel):
@@ -1391,6 +1392,7 @@ def _oracle_endpoint(body: OracleEndpointRequest) -> OracleEndpoint:
         service=body.service,
         user=body.user,
         password=body.password,
+        connect_as=body.connectAs or "service",
     )
 
 

@@ -10,11 +10,13 @@ const form = {
   sourceHost: "10.242.66.100",
   sourcePort: "1521",
   sourceService: "thorcfg1_1",
+  sourceConnectAs: "sid",
   sourceUser: "IFSINFO",
   sourcePassword: "",
   targetHost: "",
   targetPort: "1521",
   targetService: "",
+  targetConnectAs: "sid",
   targetUser: "",
   targetPassword: "",
   schema: "",
@@ -49,6 +51,7 @@ function endpoint(prefix) {
     service: form[`${prefix}Service`],
     user: form[`${prefix}User`],
     password: form[`${prefix}Password`],
+    connectAs: form[`${prefix}ConnectAs`] || "service",
   };
 }
 
@@ -58,11 +61,13 @@ function readForm() {
   form.sourceHost = get("src-host").trim();
   form.sourcePort = get("src-port").trim() || "1521";
   form.sourceService = get("src-service").trim();
+  form.sourceConnectAs = get("src-connect-as") || "service";
   form.sourceUser = get("src-user").trim();
   form.sourcePassword = get("src-password");
   form.targetHost = get("tgt-host").trim();
   form.targetPort = get("tgt-port").trim() || "1521";
   form.targetService = get("tgt-service").trim();
+  form.targetConnectAs = get("tgt-connect-as") || "service";
   form.targetUser = get("tgt-user").trim();
   form.targetPassword = get("tgt-password");
   form.schema = get("schema").trim();
@@ -82,10 +87,15 @@ function nav() {
 
 function endpointFields(prefix, title) {
   const p = prefix === "src" ? "source" : "target";
+  const connectAs = form[p + "ConnectAs"] || "service";
   return `<section class="card settings">
     <h2>${title}</h2>
     <label>Host <input id="${prefix}-host" value="${esc(form[p + "Host"])}" placeholder="10.x.x.x"/></label>
     <label>Port <input id="${prefix}-port" value="${esc(form[p + "Port"])}"/></label>
+    <label>Connect as <select id="${prefix}-connect-as">
+      <option value="service" ${connectAs === "service" ? "selected" : ""}>Service name</option>
+      <option value="sid" ${connectAs === "sid" ? "selected" : ""}>SID</option>
+    </select></label>
     <label>Service / SID <input id="${prefix}-service" value="${esc(form[p + "Service"])}" placeholder="thorcfg1_1"/></label>
     <label>Username <input id="${prefix}-user" value="${esc(form[p + "User"])}"/></label>
     <label>Password <input id="${prefix}-password" type="password" value="${esc(form[p + "Password"])}" autocomplete="off"/></label>
