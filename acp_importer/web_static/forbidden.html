@@ -11,9 +11,33 @@
     <section class="auth-card-v2">
       <h1 class="auth-brand">ACP IMPORTER</h1>
       <p class="auth-lead">Access denied</p>
-      <p class="auth-hint">You do not have permission to open this page. Ask an administrator to assign a Permission Set that includes it.</p>
-      <p class="auth-links-v2"><a href="/">Go to home</a></p>
+      <p class="auth-hint" id="hint">You do not have permission to open this page. Ask an administrator to assign a Permission Set that includes it.</p>
+      <p class="auth-links-v2"><a id="home-link" href="/">Go to home</a></p>
     </section>
   </main>
+  <script>
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/status", { credentials: "same-origin" });
+        const data = await res.json();
+        const pages = (data && data.permissions && data.permissions.pages) || {};
+        const order = [
+          ["dashboard", "/", "ACP Importer"],
+          ["clone", "/clone", "ACP Clone"],
+          ["calendar", "/calendar", "Delivery Calendar"],
+          ["releases", "/releases", "Jira Releases"],
+          ["connectors", "/connectors", "Connectors"],
+        ];
+        const first = order.find(([key]) => pages[key] && pages[key].length);
+        const link = document.getElementById("home-link");
+        const hint = document.getElementById("hint");
+        if (first) {
+          link.href = first[1];
+          link.textContent = `Go to ${first[2]}`;
+          hint.textContent = `You do not have permission to open that page. You can open ${first[2]}, or ask an administrator to update your Permission Set.`;
+        }
+      } catch (_) {}
+    })();
+  </script>
 </body>
 </html>

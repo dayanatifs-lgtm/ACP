@@ -16,6 +16,17 @@ from .store import _db, init_db, normalize_email
 FULL_ACCESS_SET_NAME = "Full Access"
 DEFAULT_PERMISSION_SET_NAME = "Default"
 
+# Non-admin grants used when creating the system Default set.
+_DEFAULT_PAGE_KEYS = ("dashboard", "clone", "calendar", "releases", "connectors")
+
+
+def _default_grants() -> list[tuple[str, str]]:
+    return [
+        (page_key, function_key)
+        for page_key, function_key in all_grants()
+        if page_key in _DEFAULT_PAGE_KEYS
+    ]
+
 
 def init_permissions_schema(db_path: Path | None = None) -> None:
     init_db(db_path)
@@ -94,7 +105,7 @@ def _audit(
 
 
 def _bootstrap(db_path: Path | None = None) -> None:
-    """Ensure Full Access set exists and existing users are not locked out."""
+    """Ensure Full Access + Default sets exist and existing users are not locked out."""
     now = time.time()
     with _db(db_path) as conn:
         row = conn.execute(
@@ -146,6 +157,39 @@ def _bootstrap(db_path: Path | None = None) -> None:
                         "INSERT INTO permission_set_grants (permission_set_id, page_key, function_key) VALUES (?, ?, ?)",
                         (set_id, page_key, function_key),
                     )
+
+        # Ensure an active Default set exists for first-time users.
+        default_row = conn.execute(
+            "SELECT id FROM permission_sets WHERE name = ? COLLATE NOCASE",
+            (DEFAULT_PERMISSION_SET_NAME,),
+        ).fetchone()
+        if default_row is None:
+            cur = conn.execute(
+                """
+                INSERT INTO permission_sets (name, description, is_active, created_at, updated_at, created_by, updated_by)
+                VALUES (?, ?, 1, ?, ?, 'system', 'system')
+                """,
+                (
+                    DEFAULT_PERMISSION_SET_NAME,
+                    "Assigned automatically to users who have no permission set yet.",
+                    now,
+                    now,
+                ),
+            )
+            default_id = int(cur.lastrowid)
+            for page_key, function_key in _default_grants():
+                conn.execute(
+                    "INSERT INTO permission_set_grants (permission_set_id, page_key, function_key) VALUES (?, ?, ?)",
+                    (default_id, page_key, function_key),
+                )
+            _audit(
+                conn,
+                actor_email="system",
+                action="create",
+                entity_type="permission_set",
+                entity_id=str(default_id),
+                detail={"name": DEFAULT_PERMISSION_SET_NAME, "bootstrap": True},
+            )
 
         verified = conn.execute(
             "SELECT id, email, is_super_admin FROM users WHERE is_verified = 1 AND password_hash IS NOT NULL"

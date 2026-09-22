@@ -19,7 +19,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .auth import clear_session_cookie, current_user, set_session_cookie
 from .auth import service as auth_service
-from .auth.permissions import check_api_permission, page_access_denied, permissions_for_request
+from .auth.permissions import (
+    check_api_permission,
+    first_allowed_path,
+    page_access_denied,
+    permissions_for_request,
+)
 from .auth.permissions_catalog import catalog_as_dict
 from .auth.permissions_store import (
     assign_permission_set,
@@ -229,6 +234,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path == "/forbidden":
             return await call_next(request)
         if page_access_denied(path, perms):
+            alt = first_allowed_path(perms)
+            if alt and alt != path:
+                return RedirectResponse(alt, status_code=302)
             return RedirectResponse("/forbidden", status_code=302)
         return await call_next(request)
 
@@ -738,6 +746,9 @@ def auth_status(request: Request) -> dict[str, Any]:
         "catalog": catalog_as_dict(),
     }
     if user:
+        from .auth.permissions_store import ensure_default_permissions
+
+        ensure_default_permissions(user["email"])
         perms = effective_grants_for_email(user["email"])
         payload["isSuperAdmin"] = bool(perms.get("isSuperAdmin"))
         payload["permissions"] = {

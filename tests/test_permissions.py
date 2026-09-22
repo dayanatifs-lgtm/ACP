@@ -108,20 +108,18 @@ class PermissionTests(unittest.TestCase):
         with store._db(self.db) as conn:
             conn.execute("DELETE FROM user_permission_sets WHERE user_id = ?", (user["id"],))
 
-        default = ps.create_permission_set(
-            name="Default",
-            grants=[
-                {"pageKey": "dashboard", "functionKey": "view"},
-                {"pageKey": "clone", "functionKey": "view"},
-            ],
-            db_path=self.db,
-        )
+        # Bootstrap already created Default; ensure assignment works.
+        sets = {s["name"].lower(): s for s in ps.list_permission_sets(self.db)}
+        self.assertIn("default", sets)
         assigned = ps.ensure_default_permissions("new@example.com", self.db)
         self.assertTrue(assigned)
         detail = ps.get_user_permission_detail("new@example.com", self.db)
-        self.assertEqual([s["id"] for s in detail["permissionSets"]], [default["id"]])
+        self.assertTrue(any(s["name"].lower() == "default" for s in detail["permissionSets"]))
         # Second call does nothing once a set is present
         self.assertFalse(ps.ensure_default_permissions("new@example.com", self.db))
+        effective = ps.effective_grants_for_email("new@example.com", self.db)
+        self.assertTrue(has_page_access(effective, "dashboard"))
+        self.assertFalse(has_page_access(effective, "administration"))
 
 
 if __name__ == "__main__":

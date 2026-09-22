@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from .permissions_catalog import page_key_for_path
+from .permissions_catalog import PAGES, page_key_for_path
 from .permissions_store import (
     effective_grants_for_email,
     ensure_default_permissions,
@@ -39,6 +39,16 @@ def has_function_access(perms: dict[str, Any] | None, page_key: str, function_ke
     pages = perms.get("pages") or {}
     return function_key in (pages.get(page_key) or [])
 
+
+def first_allowed_path(perms: dict[str, Any] | None) -> str | None:
+    """Return the first catalog page path the user can open, or None."""
+    if not perms:
+        return None
+    for page in PAGES:
+        if has_page_access(perms, page.key):
+            prefix = page.path_prefixes[0] if page.path_prefixes else None
+            return prefix or "/"
+    return None
 
 def permissions_for_request(request: Request) -> dict[str, Any] | None:
     cached = getattr(request.state, "permissions", None)
