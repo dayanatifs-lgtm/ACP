@@ -5,13 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>IFS ACP Importer</title>
     <link rel="stylesheet" href="/assets/styles.css?v=22" />
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="/assets/vendor/react.production.min.js"></script>
+    <script src="/assets/vendor/react-dom.production.min.js"></script>
   </head>
   <body>
     <main id="root">Loading ACP Importer…</main>
-<script src="/assets/auth.js?v=5"></script>
+<script src="/assets/auth.js?v=6"></script>
 <script src="/assets/workspace.js?v=1"></script>
 <script src="/assets/app.js?v=14"></script>
+<script>
+  if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
+    document.getElementById("root").innerHTML =
+      "<section class='card' style='margin:40px auto;max-width:520px'><h1>ACP Importer</h1><p class='error'>UI libraries failed to load from /assets/vendor. Restart the server after git pull.</p></section>";
+  }
+</script>
   </body>
 </html>

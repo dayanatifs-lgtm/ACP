@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,7 @@ from .profiles import (
 )
 from .deliveries import associate_jira_release, delete_delivery, get_delivery, list_deliveries, upsert_delivery
 from .jira import JiraClient, JiraSettings, JiraApiError
+from .run_sessions import ImportRun, sessions
 from .workspaces import (
     WORKSPACE_TOKEN,
     delete_workspace_file,
@@ -72,22 +73,6 @@ from .workspaces import (
 
 LOG = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "web_static"
-CLONE_STATE_FILE = Path(__file__).resolve().parent.parent / ".acp_clone_state.json"
-
-
-@dataclass
-class ImportRun:
-    running: bool = False
-    cancel_requested: bool = False
-    phase: str = "idle"
-    completed: int = 0
-    total: int = 0
-    dry_run: bool = False
-    message: str = "Ready"
-    environment: str = DEFAULT_ENVIRONMENT
-    folder: str = r"C:\UpdaClones"
-    results: list[dict[str, Any]] = field(default_factory=list)
-
 
 class ImportRequest(BaseModel):
     environment: str = DEFAULT_ENVIRONMENT
@@ -179,12 +164,7 @@ class AssignPermissionSetRequest(BaseModel):
     permissionSetId: int
 
 
-run = ImportRun()
-clone_run = ImportRun(message="Ready for dependency analysis")
-repack_run = ImportRun(message="Ready to repackage")
-clone_analysis: dict[str, Any] | None = None
-repack_report: dict[str, Any] | None = None
-run_lock = threading.Lock()
+run_lock = sessions.lock
 app = FastAPI(title="IFS ACP Importer", docs_url=None, redoc_url=None)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 init_auth_db()
@@ -244,51 +224,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
 app.add_middleware(AuthMiddleware)
 
 
-def _save_clone_state() -> None:
-    payload = {
-        "run": asdict(clone_run),
-        "analysis": clone_analysis,
-    }
-    payload["run"]["running"] = False
-    payload["run"]["cancel_requested"] = False
-    if payload["run"].get("phase") in {"starting", "importing", "analysing", "ai_retry"}:
-        payload["run"]["phase"] = "idle"
-    try:
-        CLONE_STATE_FILE.write_text(json.dumps(payload), encoding="utf-8")
-    except OSError:
-        LOG.warning("Could not save clone state to %s", CLONE_STATE_FILE)
-
-
-def _load_clone_state() -> None:
-    global clone_run, clone_analysis
-    if not CLONE_STATE_FILE.exists():
-        return
-    try:
-        payload = json.loads(CLONE_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    data = payload.get("run") or {}
-    clone_run = ImportRun(
-        running=False,
-        cancel_requested=False,
-        phase="idle",
-        completed=int(data.get("completed") or 0),
-        total=int(data.get("total") or 0),
-        dry_run=bool(data.get("dry_run")),
-        message=str(data.get("message") or clone_run.message),
-        environment=str(data.get("environment") or DEFAULT_ENVIRONMENT),
-        folder=str(data.get("folder") or clone_run.folder),
-        results=list(data.get("results") or []),
-    )
-    analysis = payload.get("analysis")
-    clone_analysis = analysis if isinstance(analysis, dict) else None
-
-
-_load_clone_state()
-
-
-def _busy() -> bool:
-    return run.running or clone_run.running or repack_run.running
 
 
 def package_files(folder: Path) -> list[Path]:
@@ -317,6 +252,16 @@ def _resolve_folder(request: Request, folder: str | None) -> str:
 
 
 @app.get("/api/workspace")
+
+def _owner(request: Request) -> str | None:
+    email, _ = _user_ctx(request)
+    return email
+
+
+def _busy(email: str | None) -> bool:
+    return sessions.user_busy(email)
+
+
 def get_workspace(request: Request) -> dict[str, Any]:
     email, _ = _user_ctx(request)
     if not email:
@@ -366,7 +311,8 @@ def remove_workspace_file(filename: str, request: Request) -> dict[str, Any]:
     return result
 
 
-def run_imports(request: ImportRequest) -> None:
+def run_imports(request: ImportRequest, owner: str | None) -> None:
+    run = sessions.import_run(owner)
     try:
         settings = settings_for(request.environment, request.folder, require_auth=not request.dry_run)
         files = package_files(settings.acp_folder)
@@ -409,11 +355,12 @@ def run_imports(request: ImportRequest) -> None:
             run.cancel_requested = False
 
 
-def run_clone(request: CloneRequest) -> None:
+def run_clone(request: CloneRequest, owner: str | None) -> None:
+    clone_run = sessions.clone_run(owner)
     try:
         settings = settings_for(request.environment, request.folder, require_auth=True)
         with run_lock:
-            cached = clone_analysis
+            cached = sessions.clone_analysis(owner)
         folder = settings.acp_folder
         if cached and Path(str(cached.get("folder", ""))).resolve() == folder.resolve():
             analysis = cached
@@ -470,14 +417,15 @@ def run_clone(request: CloneRequest) -> None:
             clone_run.running = False
             clone_run.cancel_requested = False
             clone_run.phase = "idle"
-            _save_clone_state()
+            sessions.save_clone(owner)
 
 
-def run_ai_retry(request: CloneRequest) -> None:
+def run_ai_retry(request: CloneRequest, owner: str | None) -> None:
+    clone_run = sessions.clone_run(owner)
     try:
         settings = settings_for(request.environment, request.folder, require_auth=True)
         with run_lock:
-            analysis = clone_analysis
+            analysis = sessions.clone_analysis(owner)
             prior = list(clone_run.results)
         failed = [row for row in prior if not row.get("success") and not row.get("ai")]
         if not failed:
@@ -530,11 +478,11 @@ def run_ai_retry(request: CloneRequest) -> None:
             clone_run.running = False
             clone_run.cancel_requested = False
             clone_run.phase = "idle"
-            _save_clone_state()
+            sessions.save_clone(owner)
 
 
-def run_repack_build(request: RepackBuildRequest) -> None:
-    global repack_report
+def run_repack_build(request: RepackBuildRequest, owner: str | None) -> None:
+    repack_run = sessions.repack_run(owner)
     try:
         def progress(completed: int, total: int, filename: str) -> bool:
             with run_lock:
@@ -551,7 +499,7 @@ def run_repack_build(request: RepackBuildRequest) -> None:
             progress=progress,
         )
         with run_lock:
-            repack_report = result
+            sessions.set_repack_report(owner, result)
             repack_run.message = (
                 f"Build complete: {result['summary']['generatedPackages']} packages, "
                 f"{result['summary']['itemsDiscovered']} items"
@@ -570,8 +518,8 @@ def run_repack_build(request: RepackBuildRequest) -> None:
             repack_run.phase = "idle"
 
 
-def run_repack_import(request: RepackImportRequest) -> None:
-    global repack_report
+def run_repack_import(request: RepackImportRequest, owner: str | None) -> None:
+    repack_run = sessions.repack_run(owner)
     try:
         settings = settings_for(request.environment, None, require_auth=True)
         client = IfsAcpClient(settings)
@@ -614,7 +562,7 @@ def run_repack_import(request: RepackImportRequest) -> None:
             on_result=on_result,
         )
         with run_lock:
-            repack_report = manifest
+            sessions.set_repack_report(owner, manifest)
             successful = sum(1 for item in repack_run.results if item.get("success"))
             repack_run.message = f"Repackage import finished: {successful} successful, {len(repack_run.results) - successful} not imported"
     except Exception as exc:
@@ -628,8 +576,8 @@ def run_repack_import(request: RepackImportRequest) -> None:
             repack_run.phase = "idle"
 
 
-def run_clone_analysis(environment: str, folder: str | None) -> None:
-    global clone_analysis
+def run_clone_analysis(environment: str, folder: str | None, owner: str | None) -> None:
+    clone_run = sessions.clone_run(owner)
     try:
         settings = settings_for(environment, folder, require_auth=False)
         def progress(completed: int, total: int, filename: str) -> bool:
@@ -642,23 +590,23 @@ def run_clone_analysis(environment: str, folder: str | None) -> None:
                 return True
         result = analyse(settings.acp_folder, progress)
         with run_lock:
-            clone_analysis = result
+            sessions.set_clone_analysis(owner, result)
             clone_run.completed = clone_run.total
             clone_run.message = f"Dependency analysis complete: {len(result['packages'])} valid packages, {len(result['invalid'])} invalid archives"
     except CloneAnalysisCancelled:
         with run_lock:
-            clone_analysis = None
+            sessions.set_clone_analysis(owner, None)
             clone_run.message = "Dependency analysis stopped by user. No deployment order was created."
     except Exception as exc:
         LOG.exception("ACP Clone analysis failed")
         with run_lock:
-            clone_analysis = None
+            sessions.set_clone_analysis(owner, None)
             clone_run.message = f"Dependency analysis failed: {exc}"
     finally:
         with run_lock:
             clone_run.running = False
             clone_run.phase = "idle"
-            _save_clone_state()
+            sessions.save_clone(owner)
 
 
 @app.get("/", include_in_schema=False)
@@ -1090,15 +1038,15 @@ def get_packages(
 
 
 @app.get("/api/status")
-def get_status() -> dict[str, Any]:
+def get_status(http_request: Request) -> dict[str, Any]:
     with run_lock:
-        return asdict(run)
+        return asdict(sessions.import_run(_owner(http_request)))
 
 
 @app.get("/api/clone/status")
-def get_clone_status() -> dict[str, Any]:
+def get_clone_status(http_request: Request) -> dict[str, Any]:
     with run_lock:
-        return asdict(clone_run)
+        return asdict(sessions.clone_run(_owner(http_request)))
 
 
 @app.post("/api/clone/analyse", status_code=202)
@@ -1107,36 +1055,38 @@ def analyse_clone(
     environment: str = Query(DEFAULT_ENVIRONMENT),
     folder: str | None = Query(None),
 ) -> dict[str, str]:
-    global clone_analysis
+    owner = _owner(http_request)
     resolved = _resolve_folder(http_request, folder)
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import or analysis process is already running.")
-        clone_analysis = None
+        sessions.set_clone_analysis(owner, None)
+        clone_run = sessions.clone_run(owner)
         clone_run.running = True
         clone_run.phase = "analysing"
         clone_run.completed = 0
         clone_run.total = 0
         clone_run.folder = resolved
         clone_run.message = "Preparing ACP dependency analysis…"
-    threading.Thread(target=run_clone_analysis, args=(environment, resolved), name="acp-clone-analysis", daemon=True).start()
+    threading.Thread(target=run_clone_analysis, args=(environment, resolved, owner), name="acp-clone-analysis", daemon=True).start()
     return {"message": "Dependency analysis started"}
 
 
 @app.get("/api/clone/analysis")
-def get_clone_analysis() -> dict[str, Any]:
+def get_clone_analysis(http_request: Request) -> dict[str, Any]:
     with run_lock:
-        if clone_analysis is None:
+        analysis = sessions.clone_analysis(_owner(http_request))
+        if analysis is None:
             raise HTTPException(status_code=404, detail="No completed dependency analysis is available yet.")
-        return clone_analysis
+        return analysis
 
 
 @app.get("/api/clone/analysis/export")
-def export_clone_analysis(format: str = Query("json")) -> Response:
+def export_clone_analysis(http_request: Request, format: str = Query("json")) -> Response:
     with run_lock:
-        if clone_analysis is None:
+        report = sessions.clone_analysis(_owner(http_request))
+        if report is None:
             raise HTTPException(status_code=404, detail="No completed dependency analysis is available yet.")
-        report = clone_analysis
     if format.lower() == "csv":
         return Response(
             content=export_csv(report),
@@ -1151,8 +1101,9 @@ def export_clone_analysis(format: str = Query("json")) -> Response:
 
 
 @app.get("/api/clone/results/export")
-def export_clone_results(format: str = Query("json")) -> Response:
+def export_clone_results(http_request: Request, format: str = Query("json")) -> Response:
     with run_lock:
+        clone_run = sessions.clone_run(_owner(http_request))
         payload = {
             "environment": clone_run.environment,
             "folder": clone_run.folder,
@@ -1175,15 +1126,15 @@ def export_clone_results(format: str = Query("json")) -> Response:
 
 
 @app.get("/api/repackage/status")
-def get_repackage_status() -> dict[str, Any]:
+def get_repackage_status(http_request: Request) -> dict[str, Any]:
     with run_lock:
-        return asdict(repack_run)
+        return asdict(sessions.repack_run(_owner(http_request)))
 
 
 @app.get("/api/repackage/report")
-def get_repackage_report(output_folder: str | None = Query(None)) -> dict[str, Any]:
+def get_repackage_report(http_request: Request, output_folder: str | None = Query(None)) -> dict[str, Any]:
     with run_lock:
-        cached = repack_report
+        cached = sessions.repack_report(_owner(http_request))
     if output_folder:
         requested = Path(output_folder)
         try:
@@ -1204,7 +1155,7 @@ def get_repackage_report(output_folder: str | None = Query(None)) -> dict[str, A
 
 @app.post("/api/repackage/build", status_code=202)
 def start_repackage_build(body: RepackBuildRequest, http_request: Request) -> dict[str, str]:
-    global repack_report
+    owner = _owner(http_request)
     if body.max_items < 1:
         raise HTTPException(status_code=400, detail="Maximum items per package must be at least 1.")
     source = _resolve_folder(http_request, body.source_folder)
@@ -1216,9 +1167,10 @@ def start_repackage_build(body: RepackBuildRequest, http_request: Request) -> di
         output = _resolve_folder(http_request, body.output_folder)
     body = RepackBuildRequest(source_folder=source, output_folder=output, max_items=body.max_items)
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import or analysis process is already running.")
-        repack_report = None
+        sessions.set_repack_report(owner, None)
+        repack_run = sessions.repack_run(owner)
         repack_run.running = True
         repack_run.cancel_requested = False
         repack_run.phase = "building"
@@ -1227,12 +1179,12 @@ def start_repackage_build(body: RepackBuildRequest, http_request: Request) -> di
         repack_run.results = []
         repack_run.folder = body.output_folder
         repack_run.message = "Scanning source ACP packages…"
-    threading.Thread(target=run_repack_build, args=(body,), name="acp-repack-build", daemon=True).start()
+    threading.Thread(target=run_repack_build, args=(body, owner), name="acp-repack-build", daemon=True).start()
     return {"message": "Repackage build started"}
 
 
 @app.post("/api/repackage/validate")
-def validate_repackage(output_folder: str = Query(...)) -> dict[str, Any]:
+def validate_repackage(http_request: Request, output_folder: str = Query(...)) -> dict[str, Any]:
     try:
         manifest = load_manifest(Path(output_folder))
     except FileNotFoundError as exc:
@@ -1245,44 +1197,47 @@ def validate_repackage(output_folder: str = Query(...)) -> dict[str, Any]:
         package["status"] = "READY" if validation["ok"] else "INVALID"
         results.append({"package": package["package"], **validation})
     (folder / "deployment-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    global repack_report
     with run_lock:
-        repack_report = manifest
+        sessions.set_repack_report(_owner(http_request), manifest)
     return {"ok": all(item["ok"] for item in results), "results": results, "manifest": manifest}
 
 
 @app.post("/api/repackage/imports", status_code=202)
-def start_repackage_import(request: RepackImportRequest) -> dict[str, str]:
+def start_repackage_import(body: RepackImportRequest, http_request: Request) -> dict[str, str]:
+    owner = _owner(http_request)
     try:
-        load_manifest(Path(request.output_folder))
+        load_manifest(Path(body.output_folder))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import process is already running.")
+        repack_run = sessions.repack_run(owner)
         repack_run.running = True
         repack_run.cancel_requested = False
-        repack_run.environment = request.environment
-        repack_run.folder = request.output_folder
+        repack_run.environment = body.environment
+        repack_run.folder = body.output_folder
         repack_run.results = []
         repack_run.message = "Starting generated ACP import…"
         repack_run.phase = "starting"
         repack_run.completed = 0
         repack_run.total = 0
-    threading.Thread(target=run_repack_import, args=(request,), name="acp-repack-import", daemon=True).start()
+    threading.Thread(target=run_repack_import, args=(body, owner), name="acp-repack-import", daemon=True).start()
     return {"message": "Repackage import started"}
 
 
 @app.post("/api/clone/imports", status_code=202)
 def start_clone(body: CloneRequest, http_request: Request) -> dict[str, str]:
+    owner = _owner(http_request)
     body = CloneRequest(
         environment=body.environment,
         folder=_resolve_folder(http_request, body.folder),
         order=body.order,
     )
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import process is already running.")
+        clone_run = sessions.clone_run(owner)
         clone_run.running = True
         clone_run.cancel_requested = False
         clone_run.environment = body.environment
@@ -1292,7 +1247,7 @@ def start_clone(body: CloneRequest, http_request: Request) -> dict[str, str]:
         clone_run.phase = "starting"
         clone_run.completed = 0
         clone_run.total = len(body.order)
-    threading.Thread(target=run_clone, args=(body,), name="acp-clone", daemon=True).start()
+    threading.Thread(target=run_clone, args=(body, owner), name="acp-clone", daemon=True).start()
     return {"message": "ACP Clone started"}
 
 
@@ -1307,6 +1262,7 @@ def get_ai_status() -> dict[str, Any]:
 
 @app.post("/api/clone/ai-retry", status_code=202)
 def start_ai_retry(body: CloneRequest, http_request: Request) -> dict[str, str]:
+    owner = _owner(http_request)
     body = CloneRequest(
         environment=body.environment,
         folder=_resolve_folder(http_request, body.folder),
@@ -1315,8 +1271,9 @@ def start_ai_retry(body: CloneRequest, http_request: Request) -> dict[str, str]:
     if not gemini_configured():
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY is not configured. Add it to .env and restart the dashboard.")
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import or analysis process is already running.")
+        clone_run = sessions.clone_run(owner)
         failed = [row for row in clone_run.results if not row.get("success") and not row.get("ai")]
         if not failed:
             raise HTTPException(status_code=400, detail="No failed Direct Clone packages are available to retry.")
@@ -1328,12 +1285,13 @@ def start_ai_retry(body: CloneRequest, http_request: Request) -> dict[str, str]:
         clone_run.phase = "ai_retry"
         clone_run.completed = 0
         clone_run.total = len(failed)
-    threading.Thread(target=run_ai_retry, args=(body,), name="acp-clone-ai-retry", daemon=True).start()
+    threading.Thread(target=run_ai_retry, args=(body, owner), name="acp-clone-ai-retry", daemon=True).start()
     return {"message": "AI retry started"}
 
 
 @app.post("/api/imports", status_code=202)
 def start_import(body: ImportRequest, http_request: Request) -> dict[str, str]:
+    owner = _owner(http_request)
     body = ImportRequest(
         environment=body.environment,
         folder=_resolve_folder(http_request, body.folder),
@@ -1344,8 +1302,9 @@ def start_import(body: ImportRequest, http_request: Request) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with run_lock:
-        if _busy():
+        if _busy(owner):
             raise HTTPException(status_code=409, detail="Another import process is already running.")
+        run = sessions.import_run(owner)
         run.running = True
         run.cancel_requested = False
         run.dry_run = body.dry_run
@@ -1353,13 +1312,17 @@ def start_import(body: ImportRequest, http_request: Request) -> dict[str, str]:
         run.folder = str(settings.acp_folder)
         run.message = "Starting dry run…" if body.dry_run else "Starting import…"
         run.results = []
-    threading.Thread(target=run_imports, args=(body,), name="acp-importer", daemon=True).start()
+    threading.Thread(target=run_imports, args=(body, owner), name="acp-importer", daemon=True).start()
     return {"message": "Dry run started" if body.dry_run else "Import started"}
 
 
 @app.post("/api/imports/stop", status_code=202)
-def stop_import() -> dict[str, str]:
+def stop_import(http_request: Request) -> dict[str, str]:
+    owner = _owner(http_request)
     with run_lock:
+        run = sessions.import_run(owner)
+        clone_run = sessions.clone_run(owner)
+        repack_run = sessions.repack_run(owner)
         target = run if run.running else clone_run if clone_run.running else repack_run if repack_run.running else None
         if target is None:
             raise HTTPException(status_code=409, detail="No import is currently running.")

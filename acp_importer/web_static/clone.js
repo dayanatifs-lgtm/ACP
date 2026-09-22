@@ -269,19 +269,20 @@ async function initialise() {
       repackOutput = ws.repackageOutput || "";
     }
     const [envData, cloneStatus, packStatus, aiStatus] = await Promise.all([
-      api("/api/environments"),
-      api("/api/clone/status"),
-      api("/api/repackage/status"),
+      api("/api/environments").catch(() => ({ environments: [], default: "" })),
+      api("/api/clone/status").catch(() => status),
+      api("/api/repackage/status").catch(() => repackStatus),
       api("/api/clone/ai/status").catch(() => ({ configured: false })),
     ]);
-    environments = envData.environments;
-    cloneEnvironment = envData.default;
+    environments = envData.environments || [];
+    cloneEnvironment = envData.default || "";
     status = cloneStatus;
     repackStatus = packStatus;
     aiConfigured = !!aiStatus.configured;
     render();
   } catch (e) {
     root.innerHTML = page(`<div class="shell"><section class="card"><h1>ACP Clone</h1><p class="error">${esc(e.message)}</p></section></div>`);
+    if (typeof mountSessionChrome === "function") mountSessionChrome("/clone");
   }
 }
 setInterval(async()=>{ try {

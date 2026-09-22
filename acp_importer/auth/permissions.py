@@ -165,6 +165,22 @@ def check_api_permission(method: str, path: str, perms: dict[str, Any] | None) -
             return None
         return "Missing permission: workspace upload"
 
+    # Environment list is shared by Importer, Clone, and Connectors.
+    if path == "/api/environments":
+        if (
+            has_function_access(perms, "dashboard", "view")
+            or has_function_access(perms, "clone", "view")
+            or has_function_access(perms, "connectors", "view")
+        ):
+            return None
+        return "Missing permission: environments"
+
+    # Clone reuses the import stop endpoint.
+    if path == "/api/imports/stop":
+        if has_function_access(perms, "dashboard", "stop") or has_function_access(perms, "clone", "import"):
+            return None
+        return "Missing permission: dashboard.stop or clone.import"
+
     required = resolve_api_requirement(method, path)
     if required is None:
         return None

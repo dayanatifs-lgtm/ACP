@@ -39,8 +39,26 @@ const AuthPage = (() => {
             password: document.getElementById("password").value,
           }),
         });
-        const next = new URLSearchParams(location.search).get("next") || "/";
-        location.href = next.startsWith("/") ? next : "/";
+        const next = new URLSearchParams(location.search).get("next");
+        if (next && next.startsWith("/") && !next.startsWith("//")) {
+          location.href = next;
+          return;
+        }
+        try {
+          const status = await api("/api/auth/status");
+          const pages = (status.permissions && status.permissions.pages) || {};
+          const order = [
+            ["dashboard", "/"],
+            ["clone", "/clone"],
+            ["calendar", "/calendar"],
+            ["releases", "/releases"],
+            ["connectors", "/connectors"],
+          ];
+          const first = order.find(([key]) => pages[key] && pages[key].length);
+          location.href = first ? first[1] : "/";
+        } catch {
+          location.href = "/";
+        }
       } catch (e) {
         show(error, e.message, true);
       }
