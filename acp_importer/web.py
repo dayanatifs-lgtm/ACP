@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .auth import clear_session_cookie, current_user, set_session_cookie
@@ -63,6 +63,16 @@ from .profiles import (
 from .deliveries import associate_jira_release, delete_delivery, get_delivery, list_deliveries, upsert_delivery
 from .jira import JiraClient, JiraSettings, JiraApiError
 from .run_sessions import ImportRun, sessions
+from .db_sync import (
+    OracleEndpoint,
+    compare_tables,
+    get_status as db_sync_status,
+    list_schemas as db_list_schemas,
+    list_tables as db_list_tables,
+    request_stop as db_sync_stop,
+    start_sync as db_sync_start,
+    test_connection as db_test_connection,
+)
 from .workspaces import (
     WORKSPACE_TOKEN,
     delete_workspace_file,
@@ -162,6 +172,45 @@ class PermissionSetUpdateRequest(BaseModel):
 
 class AssignPermissionSetRequest(BaseModel):
     permissionSetId: int
+
+
+class OracleEndpointRequest(BaseModel):
+    host: str
+    port: int = 1521
+    service: str
+    user: str
+    password: str = ""
+
+
+class DbSyncEndpointBody(BaseModel):
+    endpoint: OracleEndpointRequest
+
+
+class DbSyncSchemaBody(BaseModel):
+    endpoint: OracleEndpointRequest
+    owner_schema: str | None = Field(default=None, alias="schema")
+
+    model_config = {"populate_by_name": True}
+
+
+class DbSyncCompareBody(BaseModel):
+    source: OracleEndpointRequest
+    target: OracleEndpointRequest
+    owner_schema: str = Field(alias="schema")
+    tables: list[str] = []
+
+    model_config = {"populate_by_name": True}
+
+
+class DbSyncStartBody(BaseModel):
+    source: OracleEndpointRequest
+    target: OracleEndpointRequest
+    owner_schema: str = Field(alias="schema")
+    tables: list[str]
+    addMissingColumns: bool = True
+    replaceData: bool = False
+
+    model_config = {"populate_by_name": True}
 
 
 run_lock = sessions.lock
@@ -637,6 +686,11 @@ def calendar_page() -> FileResponse:
 @app.get("/connectors", include_in_schema=False)
 def connectors_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "connectors.html")
+
+
+@app.get("/db-sync", include_in_schema=False)
+def db_sync_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "db_sync.html")
 
 
 @app.get("/splash", include_in_schema=False)
@@ -1328,4 +1382,97 @@ def stop_import(http_request: Request) -> dict[str, str]:
             raise HTTPException(status_code=409, detail="No import is currently running.")
         target.cancel_requested = True
         target.message = "Stop requested. The current IFS operation will finish, then no further packages will start."
+    return {"message": "Stop requested"}
+
+def _oracle_endpoint(body: OracleEndpointRequest) -> OracleEndpoint:
+    return OracleEndpoint(
+        host=body.host,
+        port=body.port,
+        service=body.service,
+        user=body.user,
+        password=body.password,
+    )
+
+
+@app.get("/api/db-sync/status")
+def api_db_sync_status(http_request: Request) -> dict[str, Any]:
+    return db_sync_status(_owner(http_request))
+
+
+@app.post("/api/db-sync/test")
+def api_db_sync_test(body: DbSyncEndpointBody) -> dict[str, Any]:
+    try:
+        return db_test_connection(_oracle_endpoint(body.endpoint))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Connection failed: {exc}") from exc
+
+
+@app.post("/api/db-sync/schemas")
+def api_db_sync_schemas(body: DbSyncEndpointBody) -> dict[str, Any]:
+    try:
+        return {"schemas": db_list_schemas(_oracle_endpoint(body.endpoint))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/db-sync/tables")
+def api_db_sync_tables(body: DbSyncSchemaBody) -> dict[str, Any]:
+    if not body.owner_schema:
+        raise HTTPException(status_code=400, detail="Schema is required")
+    try:
+        return {"tables": db_list_tables(_oracle_endpoint(body.endpoint), body.owner_schema)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/db-sync/compare")
+def api_db_sync_compare(body: DbSyncCompareBody) -> dict[str, Any]:
+    try:
+        return compare_tables(
+            _oracle_endpoint(body.source),
+            _oracle_endpoint(body.target),
+            body.owner_schema,
+            body.tables or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/db-sync/start", status_code=202)
+def api_db_sync_start(body: DbSyncStartBody, http_request: Request) -> dict[str, str]:
+    from .auth.permissions import assert_function
+
+    if not body.tables:
+        raise HTTPException(status_code=400, detail="Select at least one table")
+    if body.addMissingColumns:
+        assert_function(http_request, "db_sync", "alter_schema")
+    try:
+        db_sync_start(
+            _owner(http_request),
+            source=_oracle_endpoint(body.source),
+            target=_oracle_endpoint(body.target),
+            schema=body.owner_schema,
+            tables=body.tables,
+            add_missing_columns=body.addMissingColumns,
+            replace_data=body.replaceData,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": "DB sync started"}
+
+
+@app.post("/api/db-sync/stop", status_code=202)
+def api_db_sync_stop(http_request: Request) -> dict[str, str]:
+    try:
+        db_sync_stop(_owner(http_request))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"message": "Stop requested"}

@@ -79,6 +79,17 @@ PAGES: tuple[PageDef, ...] = (
         ),
     ),
     PageDef(
+        key="db_sync",
+        label="DB Sync",
+        path_prefixes=("/db-sync",),
+        functions=(
+            FunctionDef("view", "View"),
+            FunctionDef("compare", "Compare schemas"),
+            FunctionDef("sync", "Run sync"),
+            FunctionDef("alter_schema", "Add missing columns"),
+        ),
+    ),
+    PageDef(
         key="administration",
         label="Administration",
         path_prefixes=("/admin",),

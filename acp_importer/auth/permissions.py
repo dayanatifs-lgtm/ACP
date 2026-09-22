@@ -140,6 +140,21 @@ def resolve_api_requirement(method: str, path: str) -> tuple[str, str] | None:
     if path.startswith("/api/clone"):
         return ("clone", "view")
 
+    if path == "/api/db-sync/test":
+        return ("db_sync", "view")
+    if path == "/api/db-sync/schemas" or path == "/api/db-sync/tables":
+        return ("db_sync", "view")
+    if path == "/api/db-sync/compare":
+        return ("db_sync", "compare")
+    if path == "/api/db-sync/start":
+        return ("db_sync", "sync")
+    if path == "/api/db-sync/stop":
+        return ("db_sync", "sync")
+    if path == "/api/db-sync/status":
+        return ("db_sync", "view")
+    if path.startswith("/api/db-sync"):
+        return ("db_sync", "view")
+
     if path == "/api/imports/stop":
         return ("dashboard", "stop")
     if path == "/api/imports":

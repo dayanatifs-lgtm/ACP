@@ -185,6 +185,7 @@ const AuthPerms = (() => {
     { href: "/calendar", page: "calendar", label: "Delivery Calendar" },
     { href: "/releases", page: "releases", label: "Jira Releases" },
     { href: "/connectors", page: "connectors", label: "Connectors" },
+    { href: "/db-sync", page: "db_sync", label: "DB Sync" },
   ];
 
   const ADMIN_ITEMS = [

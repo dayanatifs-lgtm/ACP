@@ -5,4 +5,5 @@ truststore>=0.10,<1
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 
+oracledb>=2.0,<4
 python-multipart>=0.0.9
