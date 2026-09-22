@@ -170,7 +170,14 @@ const AuthPage = (() => {
 })();
 
 const AuthPerms = (() => {
+  const CACHE_KEY = "acp_auth_status_v1";
   let status = null;
+  try {
+    const cached = sessionStorage.getItem(CACHE_KEY);
+    if (cached) status = JSON.parse(cached);
+  } catch (_) {
+    status = null;
+  }
 
   const NAV_ITEMS = [
     { href: "/", page: "dashboard", label: "ACP Importer" },
@@ -188,7 +195,17 @@ const AuthPerms = (() => {
   async function load() {
     const response = await fetch("/api/auth/status");
     status = await response.json();
+    try {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify(status));
+    } catch (_) {}
     return status;
+  }
+
+  function clearCache() {
+    status = null;
+    try {
+      sessionStorage.removeItem(CACHE_KEY);
+    } catch (_) {}
   }
 
   function getStatus() {
@@ -228,24 +245,39 @@ const AuthPerms = (() => {
     return { tools, admin };
   }
 
-  function sidebarHtml(activeHref) {
-    const { tools, admin } = navLinksHtml(activeHref);
-    const adminBlock = admin
-      ? `<div id="sidebar-admin" class="sidebar-admin-block"><div class="sidebar-section">Administration</div><nav class="sidebar-nav sidebar-nav-admin">${admin}</nav></div>`
+  function sidebarShell(activeHref, toolsHtml, adminHtml) {
+    const adminBlock = adminHtml
+      ? `<div id="sidebar-admin" class="sidebar-admin-block"><div class="sidebar-section">Administration</div><nav class="sidebar-nav sidebar-nav-admin">${adminHtml}</nav></div>`
       : "";
     return `<aside class="sidebar">
       <div class="sidebar-brand"><span class="sidebar-mark" aria-hidden="true"></span><span>ACP IMPORTER</span></div>
       <div class="sidebar-section">Tools</div>
-      <nav class="sidebar-nav sidebar-nav-tools">${tools}</nav>
+      <nav class="sidebar-nav sidebar-nav-tools">${toolsHtml || ""}</nav>
       ${adminBlock}
       <div class="sidebar-footer"><div class="sidebar-user" id="sidebar-user"></div><button type="button" id="sign-out" class="secondary sidebar-signout">Sign out</button></div>
     </aside>`;
   }
 
+  function sidebarHtml(activeHref) {
+    if (!status) {
+      const current = NAV_ITEMS.find(item => item.href === activeHref || (item.href !== "/" && activeHref.startsWith(item.href)));
+      const tools = current ? `<a class="active" href="${current.href}">${current.label}</a>` : "";
+      return sidebarShell(activeHref, tools, "");
+    }
+    const { tools, admin } = navLinksHtml(activeHref);
+    return sidebarShell(activeHref, tools, admin);
+  }
+
   function applyToExistingSidebar(activeHref) {
     const sidebar = document.querySelector(".sidebar");
     if (!sidebar) return;
-    const { tools, admin } = navLinksHtml(activeHref || location.pathname);
+    const { tools, admin } = status
+      ? navLinksHtml(activeHref || location.pathname)
+      : (() => {
+          const href = activeHref || location.pathname;
+          const current = NAV_ITEMS.find(item => item.href === href || (item.href !== "/" && href.startsWith(item.href)));
+          return { tools: current ? `<a class="active" href="${current.href}">${current.label}</a>` : "", admin: "" };
+        })();
 
     // Drop any duplicate admin blocks left from earlier renders.
     sidebar.querySelectorAll("#sidebar-admin, .sidebar-admin-block").forEach(el => el.remove());
@@ -273,7 +305,18 @@ const AuthPerms = (() => {
     }
   }
 
-  return { load, getStatus, hasPage, hasFunction, sidebarHtml, applyToExistingSidebar, NAV_ITEMS };
+  function paintCachedSidebar() {
+    if (!document.querySelector(".sidebar")) return;
+    applyToExistingSidebar(location.pathname);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", paintCachedSidebar);
+  } else {
+    paintCachedSidebar();
+  }
+
+  return { load, clearCache, getStatus, hasPage, hasFunction, sidebarHtml, applyToExistingSidebar, NAV_ITEMS };
 })();
 
 async function mountSessionChrome(activeHref, options = {}) {
@@ -293,6 +336,7 @@ async function mountSessionChrome(activeHref, options = {}) {
     if (liveSignOut) {
       liveSignOut.hidden = !data.authenticated;
       liveSignOut.onclick = async () => {
+        if (typeof AuthPerms !== "undefined" && AuthPerms.clearCache) AuthPerms.clearCache();
         await fetch("/api/auth/logout", { method: "POST" });
         location.href = "/login";
       };

@@ -21,17 +21,11 @@ function readRepackSettings() {
   repackOutput = (typeof Workspace !== "undefined" && Workspace.repackageOutput()) || repackOutput;
 }
 function nav() {
-  if (typeof AuthPerms !== "undefined" && AuthPerms.getStatus()) return AuthPerms.sidebarHtml("/clone");
+  if (typeof AuthPerms !== "undefined") return AuthPerms.sidebarHtml("/clone");
   return `<aside class="sidebar">
     <div class="sidebar-brand"><span class="sidebar-mark" aria-hidden="true"></span><span>ACP IMPORTER</span></div>
     <div class="sidebar-section">Tools</div>
-    <nav class="sidebar-nav sidebar-nav-tools">
-      <a href="/">ACP Importer</a>
-      <a class="active" href="/clone">ACP Clone</a>
-      <a href="/calendar">Delivery Calendar</a>
-      <a href="/releases">Jira Releases</a>
-      <a href="/connectors">Connectors</a>
-    </nav>
+    <nav class="sidebar-nav sidebar-nav-tools"><a class="active" href="/clone">ACP Clone</a></nav>
     <div class="sidebar-footer"><div class="sidebar-user" id="sidebar-user"></div><button type="button" id="sign-out" class="secondary sidebar-signout">Sign out</button></div>
   </aside>`;
 }

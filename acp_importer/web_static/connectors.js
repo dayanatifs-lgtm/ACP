@@ -41,19 +41,13 @@ function blankForm() {
 }
 
 function nav() {
-  if (typeof AuthPerms !== "undefined" && AuthPerms.getStatus()) {
+  if (typeof AuthPerms !== "undefined") {
     return AuthPerms.sidebarHtml("/connectors");
   }
   return `<aside class="sidebar">
     <div class="sidebar-brand"><span class="sidebar-mark" aria-hidden="true"></span><span>ACP IMPORTER</span></div>
     <div class="sidebar-section">Tools</div>
-    <nav class="sidebar-nav">
-      <a href="/">ACP Importer</a>
-      <a href="/clone">ACP Clone</a>
-      <a href="/calendar">Delivery Calendar</a>
-      <a href="/releases">Jira Releases</a>
-      <a class="active" href="/connectors">Connectors</a>
-    </nav>
+    <nav class="sidebar-nav sidebar-nav-tools"><a class="active" href="/connectors">Connectors</a></nav>
     <div class="sidebar-footer"><div class="sidebar-user" id="sidebar-user"></div><button type="button" id="sign-out" class="secondary sidebar-signout">Sign out</button></div>
   </aside>`;
 }
