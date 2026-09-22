@@ -82,7 +82,7 @@ function renderDirect(error) {
     <label>IFS environment <select id="clone-environment" ${status.running ? "disabled" : ""}>${options}</select></label>
     ${typeof Workspace !== "undefined" ? Workspace.panelHtml({ disabled: status.running, inputId: "clone-workspace-files" }) : `<label>ACP folder path <input id="clone-folder" value="${esc(cloneFolder)}" ${status.running ? "disabled" : ""}/></label>`}
     ${workspaceMessage ? `<p class="success">${esc(workspaceMessage)}</p>` : ""}
-    <p class="help">Files stay in your private folder on the server. Manage IFS environments under Connectors. After a clone run, Redeploy with AI retries failed ACPs using Gemini.</p>
+    <p class="help">Files stay in your private folder on the server. Manage IFS environments under Connectors. After a deploy run, Redeploy with AI retries failed ACPs using Gemini.</p>
     <div class="buttons"><button id="analyse" class="secondary" ${status.running ? "disabled" : ""}>${status.phase === "analysing" ? "Analysing…" : "Analyse dependencies"}</button><button id="start" class="primary" ${!analysis || !analysis.canStart || status.running ? "disabled" : ""}>Start ACP Deploy</button><button id="ai-retry" class="secondary" ${canAiRetry ? "" : "disabled"}>${status.phase === "ai_retry" ? "AI retry…" : "Redeploy with AI"}</button><button id="stop" class="danger" ${!status.running || status.cancel_requested ? "disabled" : ""}>${stopLabel}</button></div>
     ${!aiConfigured ? `<p class="help">Redeploy with AI needs GEMINI_API_KEY in .env.</p>` : failedCount ? `<p class="help">${failedCount} failed ACP${failedCount === 1 ? "" : "s"} can be retried with Gemini.</p>` : ""}</section>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}

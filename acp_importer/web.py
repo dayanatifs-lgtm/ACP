@@ -368,7 +368,7 @@ def run_clone(request: CloneRequest, owner: str | None) -> None:
             analysis = analyse(folder)
         plan_files = [pkg["file"] for level in analysis.get("deploymentPlan", []) for pkg in level.get("packages", [])]
         if not plan_files or not analysis.get("canStart"):
-            raise ValueError(analysis.get("notes") or "ACP Clone cannot start until circular dependency chains are resolved.")
+            raise ValueError(analysis.get("notes") or "ACP Deploy cannot start until circular dependency chains are resolved.")
         requested = [name for name in request.order if name in plan_files]
         ordered_files = requested if set(requested) == set(plan_files) else plan_files
         rows = {row["file"]: row for row in analysis["packages"]}
@@ -411,7 +411,7 @@ def run_clone(request: CloneRequest, owner: str | None) -> None:
     except Exception as exc:
         LOG.exception("ACP Clone run failed")
         with run_lock:
-            clone_run.message = f"Could not start ACP Clone: {exc}"
+            clone_run.message = f"Could not start ACP Deploy: {exc}"
     finally:
         with run_lock:
             clone_run.running = False
@@ -1243,12 +1243,12 @@ def start_clone(body: CloneRequest, http_request: Request) -> dict[str, str]:
         clone_run.environment = body.environment
         clone_run.folder = body.folder or r"C:\UpdaClones"
         clone_run.results = []
-        clone_run.message = "Starting ACP Clone…"
+        clone_run.message = "Starting ACP Deploy…"
         clone_run.phase = "starting"
         clone_run.completed = 0
         clone_run.total = len(body.order)
     threading.Thread(target=run_clone, args=(body, owner), name="acp-clone", daemon=True).start()
-    return {"message": "ACP Clone started"}
+    return {"message": "ACP Deploy started"}
 
 
 @app.get("/api/clone/ai/status")
