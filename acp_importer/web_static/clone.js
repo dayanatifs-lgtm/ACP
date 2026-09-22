@@ -25,7 +25,7 @@ function nav() {
   return `<aside class="sidebar">
     <div class="sidebar-brand"><span class="sidebar-mark" aria-hidden="true"></span><span>ACP IMPORTER</span></div>
     <div class="sidebar-section">Tools</div>
-    <nav class="sidebar-nav sidebar-nav-tools"><a class="active" href="/clone">ACP Clone</a></nav>
+    <nav class="sidebar-nav sidebar-nav-tools"><a class="active" href="/clone">ACP Deploy</a></nav>
     <div class="sidebar-footer"><div class="sidebar-user" id="sidebar-user"></div><button type="button" id="sign-out" class="secondary sidebar-signout">Sign out</button></div>
   </aside>`;
 }
@@ -33,7 +33,7 @@ function page(content) {
   return `<div class="app-frame">${nav()}<div class="main-panel">${content}</div></div>`;
 }
 function modeButtons() {
-  return `<div class="mode-toggle"><button class="${mode === "direct" ? "primary" : "secondary"}" id="mode-direct">Direct ACP Clone</button><button class="${mode === "repackage" ? "primary" : "secondary"}" id="mode-repack">Repackage &amp; Deploy</button></div>`;
+  return `<div class="mode-toggle"><button class="${mode === "direct" ? "primary" : "secondary"}" id="mode-direct">Direct ACP Deploy</button><button class="${mode === "repackage" ? "primary" : "secondary"}" id="mode-repack">Repackage &amp; Deploy</button></div>`;
 }
 function summary() {
   const s = analysis.summary || {};
@@ -71,23 +71,23 @@ function bindMode() {
 }
 function renderDirect(error) {
   const options = environments.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-  const results = status.results.length ? status.results.map(x => `<li><b class="${x.success ? "success" : "failed"}">${x.skipped ? "SKIPPED" : x.ai ? (x.success ? "AI SUCCESS" : "AI FAILED") : x.success ? "SUCCESS" : "FAILED"}</b> <b>${esc(x.name)}</b><p>${esc(x.message)}</p></li>`).join("") : "<p>No clone has been run yet.</p>";
+  const results = status.results.length ? status.results.map(x => `<li><b class="${x.success ? "success" : "failed"}">${x.skipped ? "SKIPPED" : x.ai ? (x.success ? "AI SUCCESS" : "AI FAILED") : x.success ? "SUCCESS" : "FAILED"}</b> <b>${esc(x.name)}</b><p>${esc(x.message)}</p></li>`).join("") : "<p>No deploy has been run yet.</p>";
   const progress = (status.phase === "analysing" || status.phase === "ai_retry") && status.total ? ` (${status.completed} / ${status.total})` : "";
-  const stopLabel = status.cancel_requested ? "Stopping…" : status.phase === "analysing" ? "Stop analysis" : status.phase === "ai_retry" ? "Stop AI retry" : "Stop clone";
+  const stopLabel = status.cancel_requested ? "Stopping…" : status.phase === "analysing" ? "Stop analysis" : status.phase === "ai_retry" ? "Stop AI retry" : "Stop deploy";
   const failedCount = (status.results || []).filter(x => !x.success && !x.ai).length;
   const canAiRetry = aiConfigured && failedCount > 0 && !status.running;
   const resultsExport = status.results.length ? `<div class="buttons"><a class="secondary button-link" href="/api/clone/results/export?format=json">Export JSON</a><a class="secondary button-link" href="/api/clone/results/export?format=csv">Export CSV</a></div>` : "";
-  root.innerHTML = page(`<div class="shell clone-shell"><header><p class="eyebrow">DEPENDENCY-AWARE DEPLOYMENT</p><h1>ACP Clone</h1><p class="subtitle">Upload packages from your computer into your private server workspace, then analyse and clone.</p></header>
-    <section class="card settings"><h2>Clone settings</h2>${modeButtons()}
+  root.innerHTML = page(`<div class="shell clone-shell"><header><p class="eyebrow">DEPENDENCY-AWARE DEPLOYMENT</p><h1>ACP Deploy</h1><p class="subtitle">Upload packages from your computer into your private server workspace, then analyse and deploy.</p></header>
+    <section class="card settings"><h2>Deploy settings</h2>${modeButtons()}
     <label>IFS environment <select id="clone-environment" ${status.running ? "disabled" : ""}>${options}</select></label>
     ${typeof Workspace !== "undefined" ? Workspace.panelHtml({ disabled: status.running, inputId: "clone-workspace-files" }) : `<label>ACP folder path <input id="clone-folder" value="${esc(cloneFolder)}" ${status.running ? "disabled" : ""}/></label>`}
     ${workspaceMessage ? `<p class="success">${esc(workspaceMessage)}</p>` : ""}
     <p class="help">Files stay in your private folder on the server. Manage IFS environments under Connectors. After a clone run, Redeploy with AI retries failed ACPs using Gemini.</p>
-    <div class="buttons"><button id="analyse" class="secondary" ${status.running ? "disabled" : ""}>${status.phase === "analysing" ? "Analysing…" : "Analyse dependencies"}</button><button id="start" class="primary" ${!analysis || !analysis.canStart || status.running ? "disabled" : ""}>Start ACP Clone</button><button id="ai-retry" class="secondary" ${canAiRetry ? "" : "disabled"}>${status.phase === "ai_retry" ? "AI retry…" : "Redeploy with AI"}</button><button id="stop" class="danger" ${!status.running || status.cancel_requested ? "disabled" : ""}>${stopLabel}</button></div>
+    <div class="buttons"><button id="analyse" class="secondary" ${status.running ? "disabled" : ""}>${status.phase === "analysing" ? "Analysing…" : "Analyse dependencies"}</button><button id="start" class="primary" ${!analysis || !analysis.canStart || status.running ? "disabled" : ""}>Start ACP Deploy</button><button id="ai-retry" class="secondary" ${canAiRetry ? "" : "disabled"}>${status.phase === "ai_retry" ? "AI retry…" : "Redeploy with AI"}</button><button id="stop" class="danger" ${!status.running || status.cancel_requested ? "disabled" : ""}>${stopLabel}</button></div>
     ${!aiConfigured ? `<p class="help">Redeploy with AI needs GEMINI_API_KEY in .env.</p>` : failedCount ? `<p class="help">${failedCount} failed ACP${failedCount === 1 ? "" : "s"} can be retried with Gemini.</p>` : ""}</section>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}
-    <section class="card"><h2>${status.phase === "analysing" ? "Dependency analysis in progress" : status.phase === "ai_retry" ? "AI retry in progress" : status.running ? "Clone in progress" : "Clone status"}</h2><p class="${status.running ? "progress" : ""}">${esc(status.message)}${progress}</p></section>
-    ${analysisCard()}<section class="card"><div class="section-heading"><h2>Clone results</h2>${resultsExport}</div><ul class="results">${results}</ul></section></div>`);
+    <section class="card"><h2>${status.phase === "analysing" ? "Dependency analysis in progress" : status.phase === "ai_retry" ? "AI retry in progress" : status.running ? "Deploy in progress" : "Deploy status"}</h2><p class="${status.running ? "progress" : ""}">${esc(status.message)}${progress}</p></section>
+    ${analysisCard()}<section class="card"><div class="section-heading"><h2>Deploy results</h2>${resultsExport}</div><ul class="results">${results}</ul></section></div>`);
   bindMode();
   document.getElementById("clone-environment").value = cloneEnvironment || environments[0] || "";
   document.getElementById("clone-environment").onchange = e => { cloneEnvironment = e.target.value; };
@@ -152,7 +152,7 @@ function renderRepackage(error) {
     pending: repackReport.packages.filter(p => !p.importStatus || p.importStatus === "PENDING").length,
     blocked: repackReport.packages.filter(p => p.importStatus === "BLOCKED").length
   } : null;
-  root.innerHTML = page(`<div class="shell clone-shell"><header><p class="eyebrow">REPACKAGE &amp; DEPLOY</p><h1>ACP Clone</h1><p class="subtitle">Scan packages in your workspace, generate smaller valid packages, then import by category.</p></header>
+  root.innerHTML = page(`<div class="shell clone-shell"><header><p class="eyebrow">REPACKAGE &amp; DEPLOY</p><h1>ACP Deploy</h1><p class="subtitle">Scan packages in your workspace, generate smaller valid packages, then import by category.</p></header>
     <section class="card settings"><h2>Repackage settings</h2>${modeButtons()}
       <label>IFS environment <select id="clone-environment" ${busy ? "disabled" : ""}>${options}</select></label>
       ${typeof Workspace !== "undefined" ? Workspace.panelHtml({ disabled: busy, inputId: "repack-workspace-files" }) : `<label>Source ACP folder <input id="repack-source" value="${esc(repackSource)}" ${busy ? "disabled" : ""}/></label>`}
@@ -275,7 +275,7 @@ async function initialise() {
     aiConfigured = !!aiStatus.configured;
     render();
   } catch (e) {
-    root.innerHTML = page(`<div class="shell"><section class="card"><h1>ACP Clone</h1><p class="error">${esc(e.message)}</p></section></div>`);
+    root.innerHTML = page(`<div class="shell"><section class="card"><h1>ACP Deploy</h1><p class="error">${esc(e.message)}</p></section></div>`);
     if (typeof mountSessionChrome === "function") mountSessionChrome("/clone");
   }
 }

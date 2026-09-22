@@ -36,7 +36,7 @@ PAGES: tuple[PageDef, ...] = (
     ),
     PageDef(
         key="clone",
-        label="ACP Clone",
+        label="ACP Deploy",
         path_prefixes=("/clone",),
         functions=(
             FunctionDef("view", "View"),

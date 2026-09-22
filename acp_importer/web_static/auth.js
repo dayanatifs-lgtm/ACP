@@ -181,7 +181,7 @@ const AuthPerms = (() => {
 
   const NAV_ITEMS = [
     { href: "/", page: "dashboard", label: "ACP Importer" },
-    { href: "/clone", page: "clone", label: "ACP Clone" },
+    { href: "/clone", page: "clone", label: "ACP Deploy" },
     { href: "/calendar", page: "calendar", label: "Delivery Calendar" },
     { href: "/releases", page: "releases", label: "Jira Releases" },
     { href: "/connectors", page: "connectors", label: "Connectors" },

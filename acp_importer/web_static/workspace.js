@@ -62,7 +62,7 @@ const Workspace = (() => {
       : `<p class="help">No packages uploaded yet.</p>`;
     return `<div class="workspace-panel">
       <div class="workspace-path"><span>Your server workspace</span><code>${escapeHtml(path())}</code></div>
-      <p class="help">Upload .acp / .zip files from your computer. The server stores them in your private folder and Import/Clone use that folder.</p>
+      <p class="help">Upload .acp / .zip files from your computer. The server stores them in your private folder and Import/Deploy use that folder.</p>
       <div class="workspace-upload path-row">
         <input id="${inputId}" type="file" accept=".acp,.zip,application/zip" multiple ${disabled ? "disabled" : ""}/>
         <button type="button" class="primary" id="${inputId}-upload" ${disabled ? "disabled" : ""}>Upload</button>

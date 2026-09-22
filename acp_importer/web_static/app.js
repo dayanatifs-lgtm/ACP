@@ -138,7 +138,7 @@ function Dashboard() {
       h("div", { className: "sidebar-section" }, "Tools"),
       h("nav", { className: "sidebar-nav sidebar-nav-tools" },
         h("a", { className: "active", href: "/" }, "ACP Importer"),
-        h("a", { href: "/clone" }, "ACP Clone"),
+        h("a", { href: "/clone" }, "ACP Deploy"),
         h("a", { href: "/calendar" }, "Delivery Calendar"),
         h("a", { href: "/releases" }, "Jira Releases"),
         h("a", { href: "/connectors" }, "Connectors")

@@ -24,7 +24,7 @@ function ReleaseDetails() {
       h("div", { className: "sidebar-section" }, "Tools"),
       h("nav", { className: "sidebar-nav" },
         h("a", { className: "", href: "/" }, "ACP Importer"),
-        h("a", { className: "", href: "/clone" }, "ACP Clone"),
+        h("a", { className: "", href: "/clone" }, "ACP Deploy"),
         h("a", { className: "", href: "/calendar" }, "Delivery Calendar"),
         h("a", { className: "active", href: "/releases" }, "Jira Releases"),
         h("a", { className: "", href: "/connectors" }, "Connectors")

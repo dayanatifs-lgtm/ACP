@@ -128,7 +128,7 @@ function render() {
     <header>
       <p class="eyebrow">IFS ENVIRONMENT SETUP</p>
       <h1>Connectors</h1>
-      <p class="subtitle">Save IFS connection details here. Tested connectors appear in the IFS environment dropdown on ACP Importer and ACP Clone.</p>
+      <p class="subtitle">Save IFS connection details here. Tested connectors appear in the IFS environment dropdown on ACP Importer and ACP Deploy.</p>
     </header>
     <div class="connector-layout">
       <section class="card connector-side">
