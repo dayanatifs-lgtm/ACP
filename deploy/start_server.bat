@@ -22,7 +22,7 @@ if exist ".venv\Scripts\python.exe" (
   set "PY=.venv\Scripts\python.exe"
 )
 
-"%PY%" -c "import uvicorn, multipart" 1>nul 2>nul
+"%PY%" -c "import uvicorn, multipart, oracledb" 1>nul 2>nul
 if errorlevel 1 (
   echo Installing / updating requirements into .venv ...
   "%PY%" -m pip install --upgrade pip
