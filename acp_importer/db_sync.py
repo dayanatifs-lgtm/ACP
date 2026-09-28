@@ -35,12 +35,29 @@ _thick_state: dict[str, Any] = {
 }
 
 
+def _bundled_net_dir() -> Path:
+    return Path(__file__).resolve().parent / "oracle_net"
+
+
+def _dir_has_sqlnet(path: Path) -> bool:
+    return path.is_dir() and (path / "sqlnet.ora").is_file()
+
+
 def _net_config_dir() -> str:
-    for key in ("TNS_ADMIN", "ORACLE_NET_CONFIG_DIR"):
+    """Return a TNS_ADMIN that actually exists on this machine.
+
+    Ignore stale TNS_ADMIN values copied from a laptop (they cause ORA-12569
+    because sqlnet.ora never loads and a 19c dbhome network/admin is used).
+    """
+    bundled = _bundled_net_dir()
+    for key in ("ORACLE_NET_CONFIG_DIR", "TNS_ADMIN"):
         value = (os.environ.get(key) or "").strip().strip('"')
         if value:
-            return value
-    return str(Path(__file__).resolve().parent / "oracle_net")
+            candidate = Path(value)
+            if _dir_has_sqlnet(candidate):
+                return str(candidate)
+            LOG.warning("Ignoring %s=%s (sqlnet.ora not found)", key, value)
+    return str(bundled)
 
 
 @dataclass
@@ -126,6 +143,15 @@ def _require_oracledb():
     return oracledb
 
 
+def _is_dbhome_client(path: str) -> bool:
+    lower = path.lower().replace("/", "\\")
+    return "dbhome" in lower or ("\\product\\" in lower and "instantclient" not in lower)
+
+
+def _is_instant_client(path: str) -> bool:
+    return "instantclient" in path.lower()
+
+
 def _candidate_client_dirs() -> list[str]:
     dirs: list[str] = []
     for key in ("ORACLE_CLIENT_LIB_DIR", "ORACLE_HOME"):
@@ -136,12 +162,16 @@ def _candidate_client_dirs() -> list[str]:
             if bin_dir not in dirs:
                 dirs.append(bin_dir)
 
-    for base in (Path(r"C:\oracle"), Path(r"C:\Oracle"), Path(r"D:\oracle"), Path(r"C:\app")):
+    for base in (Path(r"C:\oracle"), Path(r"C:\Oracle"), Path(r"D:\oracle"), Path(r"C:\instantclient"), Path(r"C:\app")):
         if not base.exists():
             continue
         try:
             for match in base.rglob("oci.dll"):
-                dirs.append(str(match.parent))
+                parent = str(match.parent)
+                if _is_instant_client(parent) or "client" in parent.lower():
+                    dirs.append(parent)
+                elif not _is_dbhome_client(parent):
+                    dirs.append(parent)
         except Exception:
             LOG.debug("Could not scan %s for Instant Client", base, exc_info=True)
 
@@ -153,14 +183,18 @@ def _candidate_client_dirs() -> list[str]:
             dirs.append(part)
 
     seen: set[str] = set()
-    out: list[str] = []
+    unique: list[str] = []
     for item in dirs:
         key = item.lower()
         if key in seen:
             continue
         seen.add(key)
-        out.append(item)
-    return out
+        unique.append(item)
+
+    preferred = [p for p in unique if _is_instant_client(p)]
+    other = [p for p in unique if p not in preferred and not _is_dbhome_client(p)]
+    dbhomes = [p for p in unique if _is_dbhome_client(p)]
+    return preferred + other + dbhomes
 
 
 def ensure_thick_mode(lib_dir: str | None = None) -> dict[str, Any]:
@@ -177,6 +211,7 @@ def ensure_thick_mode(lib_dir: str | None = None) -> dict[str, Any]:
 
         last_error: Exception | None = None
         config_dir = _net_config_dir()
+        os.environ["TNS_ADMIN"] = config_dir
         for candidate in candidates:
             try:
                 kwargs: dict[str, Any] = {}
@@ -310,9 +345,10 @@ def _friendly_connect_error(exc: Exception, endpoint: OracleEndpoint) -> str:
         )
     if "12569" in text or "packet checksum" in text.lower():
         hints.append(
-            "ORA-12569 is an Oracle Net encryption/checksum mismatch. Restart after pull so "
-            "TNS_ADMIN points at acp_importer/oracle_net (sqlnet.ora). IFS Cloud hosts usually "
-            "need Connect as = Service name (e.g. alepdb), not SID."
+            "ORA-12569 is an Oracle Net encryption/checksum mismatch. "
+            "Restart start_server.bat so TNS_ADMIN is the server copy of acp_importer/oracle_net "
+            "(not a laptop path). Prefer Instant Client over a 19c dbhome. "
+            "IFS Cloud hosts usually need Connect as = Service name."
         )
     return f"{text} — {' '.join(hints)}"
 

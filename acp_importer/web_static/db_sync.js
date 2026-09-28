@@ -145,6 +145,10 @@ function render() {
         <button type="button" class="secondary" id="select-none" ${status.running ? "disabled" : ""}>Clear</button>
       </div>`
     : `<p class="help">Load schemas, choose a schema, then load tables.</p>`;
+  const thickDir = (status.thick && status.thick.libDir) || "";
+  const dbhomeWarn = /dbhome/i.test(thickDir)
+    ? " Using a full Oracle dbhome as the client often causes ORA-12569 — install Instant Client and set ORACLE_CLIENT_LIB_DIR."
+    : "";
 
   root.innerHTML = `<div class="app-frame">${nav()}<div class="main-panel"><div class="shell">
     <header>
@@ -158,7 +162,7 @@ function render() {
     <section class="card settings">
       <h2>Client mode</h2>
       <label class="check-row"><input id="opt-thick" type="checkbox" ${form.thick ? "checked" : ""}/> Use Oracle Instant Client (thick mode) — required when DB uses network encryption</label>
-      <p class="help">Set <code>ORACLE_CLIENT_LIB_DIR</code> to the folder with <code>oci.dll</code>. Restart via start_server.bat so <code>TNS_ADMIN</code> loads sqlnet.ora (fixes ORA-12569 checksum). Current client: ${esc((status.thick && status.thick.libDir) || "not initialized")}${status.thick && status.thick.configDir ? `; TNS_ADMIN ${esc(status.thick.configDir)}` : ""}${status.thick && status.thick.error ? ` — ${esc(status.thick.error)}` : ""}</p>
+      <p class="help">Set <code>ORACLE_CLIENT_LIB_DIR</code> to Instant Client (<code>oci.dll</code>), not dbhome_1. Restart start_server.bat after pull. Current client: ${esc(thickDir || "not initialized")}${status.thick && status.thick.configDir ? `; TNS_ADMIN ${esc(status.thick.configDir)}` : ""}${dbhomeWarn}${status.thick && status.thick.error ? ` — ${esc(status.thick.error)}` : ""}</p>
     </section>
     <div class="db-sync-endpoints">
       ${endpointFields("src", "Source (CFG)")}
