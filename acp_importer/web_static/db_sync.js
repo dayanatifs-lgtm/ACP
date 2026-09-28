@@ -10,13 +10,13 @@ const form = {
   sourceHost: "10.242.66.100",
   sourcePort: "1521",
   sourceService: "thorcfg1_1",
-  sourceConnectAs: "sid",
+  sourceConnectAs: "service",
   sourceUser: "IFSINFO",
   sourcePassword: "",
   targetHost: "",
   targetPort: "1521",
   targetService: "",
-  targetConnectAs: "sid",
+  targetConnectAs: "service",
   targetUser: "",
   targetPassword: "",
   thick: true,
@@ -158,7 +158,7 @@ function render() {
     <section class="card settings">
       <h2>Client mode</h2>
       <label class="check-row"><input id="opt-thick" type="checkbox" ${form.thick ? "checked" : ""}/> Use Oracle Instant Client (thick mode) — required when DB uses network encryption</label>
-      <p class="help">Set server env <code>ORACLE_CLIENT_LIB_DIR</code> to the folder with <code>oci.dll</code>, then restart. Current: ${esc((status.thick && status.thick.libDir) || "not initialized")}${status.thick && status.thick.error ? ` — ${esc(status.thick.error)}` : ""}</p>
+      <p class="help">Set <code>ORACLE_CLIENT_LIB_DIR</code> to the folder with <code>oci.dll</code>. Restart via start_server.bat so <code>TNS_ADMIN</code> loads sqlnet.ora (fixes ORA-12569 checksum). Current client: ${esc((status.thick && status.thick.libDir) || "not initialized")}${status.thick && status.thick.configDir ? `; TNS_ADMIN ${esc(status.thick.configDir)}` : ""}${status.thick && status.thick.error ? ` — ${esc(status.thick.error)}` : ""}</p>
     </section>
     <div class="db-sync-endpoints">
       ${endpointFields("src", "Source (CFG)")}
@@ -230,6 +230,7 @@ async function testEndpoint(which) {
   } catch (e) {
     error = e.message;
   }
+  await refreshStatus();
   render();
 }
 

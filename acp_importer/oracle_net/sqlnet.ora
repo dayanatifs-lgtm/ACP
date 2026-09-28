@@ -1,0 +1,8 @@
+# Used by DB Sync thick mode (Native Network Encryption / checksum).
+# Override with TNS_ADMIN pointing at another folder if your site requires different values.
+DISABLE_OOB = ON
+SQLNET.AUTHENTICATION_SERVICES = (NONE)
+SQLNET.ENCRYPTION_CLIENT = accepted
+SQLNET.ENCRYPTION_TYPES_CLIENT = (AES256, AES192, AES128, 3DES168)
+SQLNET.CRYPTO_CHECKSUM_CLIENT = accepted
+SQLNET.CRYPTO_CHECKSUM_TYPES_CLIENT = (SHA1, MD5, SHA256)

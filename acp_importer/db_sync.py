@@ -26,7 +26,21 @@ LOG = logging.getLogger("DbSync")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
 
 _thick_lock = threading.Lock()
-_thick_state: dict[str, Any] = {"attempted": False, "enabled": False, "lib_dir": None, "error": None}
+_thick_state: dict[str, Any] = {
+    "attempted": False,
+    "enabled": False,
+    "lib_dir": None,
+    "config_dir": None,
+    "error": None,
+}
+
+
+def _net_config_dir() -> str:
+    for key in ("TNS_ADMIN", "ORACLE_NET_CONFIG_DIR"):
+        value = (os.environ.get(key) or "").strip().strip('"')
+        if value:
+            return value
+    return str(Path(__file__).resolve().parent / "oracle_net")
 
 
 @dataclass
@@ -87,6 +101,7 @@ def get_status(owner: str | None) -> dict[str, Any]:
     status["thick"] = {
         "enabled": bool(_thick_state["enabled"]),
         "libDir": _thick_state["lib_dir"],
+        "configDir": _thick_state["config_dir"],
         "error": _thick_state["error"],
     }
     return status
@@ -161,26 +176,36 @@ def ensure_thick_mode(lib_dir: str | None = None) -> dict[str, Any]:
         candidates.append("")  # empty = PATH / default search
 
         last_error: Exception | None = None
+        config_dir = _net_config_dir()
         for candidate in candidates:
             try:
                 kwargs: dict[str, Any] = {}
                 if candidate:
                     kwargs["lib_dir"] = candidate
+                if config_dir:
+                    kwargs["config_dir"] = config_dir
                 oracledb.init_oracle_client(**kwargs)
                 _thick_state["attempted"] = True
                 _thick_state["enabled"] = True
                 _thick_state["lib_dir"] = candidate or "(PATH/default)"
+                _thick_state["config_dir"] = config_dir
                 _thick_state["error"] = None
-                LOG.info("Oracle thick mode enabled via %s", _thick_state["lib_dir"])
-                return {"ok": True, "libDir": _thick_state["lib_dir"]}
+                LOG.info("Oracle thick mode enabled via %s (TNS %s)", _thick_state["lib_dir"], config_dir)
+                return {"ok": True, "libDir": _thick_state["lib_dir"], "configDir": config_dir}
             except Exception as exc:
                 msg = str(exc).lower()
                 if "already been initialized" in msg or "dpi-1012" in msg:
                     _thick_state["attempted"] = True
                     _thick_state["enabled"] = True
                     _thick_state["lib_dir"] = candidate or _thick_state["lib_dir"] or "(PATH/default)"
+                    _thick_state["config_dir"] = _thick_state["config_dir"] or config_dir
                     _thick_state["error"] = None
-                    return {"ok": True, "libDir": _thick_state["lib_dir"], "already": True}
+                    return {
+                        "ok": True,
+                        "libDir": _thick_state["lib_dir"],
+                        "configDir": _thick_state["config_dir"],
+                        "already": True,
+                    }
                 last_error = exc
                 continue
 
@@ -199,6 +224,7 @@ def thick_status() -> dict[str, Any]:
     return {
         "enabled": bool(_thick_state["enabled"]),
         "libDir": _thick_state["lib_dir"],
+        "configDir": _thick_state["config_dir"] or _net_config_dir(),
         "error": _thick_state["error"],
         "candidates": _candidate_client_dirs()[:8],
     }
@@ -231,7 +257,39 @@ def _connect(endpoint: OracleEndpoint):
         kwargs["sid"] = name
     else:
         kwargs["service_name"] = name
-    return oracledb.connect(**kwargs)
+    try:
+        return oracledb.connect(**kwargs)
+    except Exception as first:
+        if not _should_retry_connect_mode(first):
+            raise
+        alt = dict(kwargs)
+        alt.pop("sid", None)
+        alt.pop("service_name", None)
+        if "sid" in kwargs:
+            alt["service_name"] = name
+        else:
+            alt["sid"] = name
+        LOG.info("Retrying Oracle connect using %s instead of %s", "service name" if "service_name" in alt else "SID", endpoint.connect_mode())
+        try:
+            return oracledb.connect(**alt)
+        except Exception:
+            raise first from None
+
+
+def _should_retry_connect_mode(exc: Exception) -> bool:
+    text = str(exc).upper()
+    markers = (
+        "ORA-12569",
+        "ORA-12514",
+        "ORA-12505",
+        "ORA-12541",
+        "DPY-6001",
+        "DPY-6005",
+        "DPY-4011",
+        "TNS:PACKET CHECKSUM",
+        "LISTENER DOES NOT CURRENTLY KNOW",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _friendly_connect_error(exc: Exception, endpoint: OracleEndpoint) -> str:
@@ -249,6 +307,12 @@ def _friendly_connect_error(exc: Exception, endpoint: OracleEndpoint) -> str:
         hints.append(
             "This pattern often means Native Network Encryption — tick "
             "'Use Oracle Instant Client (thick mode)' and install Instant Client on the server."
+        )
+    if "12569" in text or "packet checksum" in text.lower():
+        hints.append(
+            "ORA-12569 is an Oracle Net encryption/checksum mismatch. Restart after pull so "
+            "TNS_ADMIN points at acp_importer/oracle_net (sqlnet.ora). IFS Cloud hosts usually "
+            "need Connect as = Service name (e.g. alepdb), not SID."
         )
     return f"{text} — {' '.join(hints)}"
 
