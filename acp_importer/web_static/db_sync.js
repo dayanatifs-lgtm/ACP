@@ -119,6 +119,7 @@ function compareBlock() {
     </tr>`;
   }).join("");
   return `<section class="card"><h2>Compare result</h2>
+    ${status.compare.tableCount ? `<p class="help">${status.compare.issueCount || 0} table(s) need attention out of ${status.compare.tableCount}. OK tables are hidden.</p>` : ""}
     <div class="items-table-wrap"><table class="items-table">
       <thead><tr><th>Table</th><th>Status</th><th>Missing columns on target</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -127,8 +128,24 @@ function compareBlock() {
 
 function resultsBlock() {
   if (!status.results || !status.results.length) return "";
-  const rows = status.results.map(r => `<li><b class="${r.success ? "success" : "failed"}">${r.success ? "OK" : "FAIL"}</b> <b>${esc(r.table)}</b><p>${esc(r.message)}</p></li>`).join("");
-  return `<section class="card"><h2>Sync results</h2><ul class="results">${rows}</ul></section>`;
+  const latest = status.results.slice(-20).reverse();
+  const hidden = (status.resultsTotal || status.results.length) - latest.length;
+  const rows = latest.map(r => `<li><b class="${r.success ? "success" : "failed"}">${r.success ? "OK" : "FAIL"}</b> <b>${esc(r.table)}</b><p>${esc(r.message)}</p></li>`).join("");
+  const more = hidden > 0 ? `<p class="help">Showing the latest ${latest.length} of ${status.resultsTotal || status.results.length} finished tables.</p>` : "";
+  return `<section class="card"><h2>Recent tables</h2>${more}<ul class="results">${rows}</ul></section>`;
+}
+
+function statusBlock() {
+  const table = status.current_table || "—";
+  const action = status.current_action || status.phase || "idle";
+  const progress = status.total ? `${status.completed} finished / ${status.total} selected` : "";
+  const rows = Number(status.rows_copied || 0);
+  return `<section class="card">
+    <h2>Status</h2>
+    <p class="${status.running ? "progress" : ""}">${esc(status.message || "Ready")}</p>
+    <p><b>Current table:</b> ${esc(table)}</p>
+    <p><b>Step:</b> ${esc(action)}${progress ? ` · ${esc(progress)}` : ""}${rows ? ` · ${rows} row(s) copied on this table` : ""}</p>
+  </section>`;
 }
 
 function render() {
@@ -186,7 +203,7 @@ function render() {
         <button type="button" class="danger" id="stop-sync" ${!status.running ? "disabled" : ""}>Stop</button>
       </div>
     </section>
-    <section class="card"><h2>Status</h2><p class="${status.running ? "progress" : ""}">${esc(status.message)}${status.total ? ` (${status.completed}/${status.total})` : ""}</p></section>
+    ${statusBlock()}
     ${compareBlock()}
     ${resultsBlock()}
   </div></div></div>`;

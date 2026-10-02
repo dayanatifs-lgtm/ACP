@@ -93,8 +93,11 @@ class SyncJob:
     cancel_requested: bool = False
     phase: str = "idle"
     message: str = "Ready"
+    current_table: str = ""
+    current_action: str = ""
     completed: int = 0
     total: int = 0
+    rows_copied: int = 0
     results: list[dict[str, Any]] = field(default_factory=list)
     compare: dict[str, Any] | None = None
 
@@ -115,6 +118,18 @@ def get_status(owner: str | None) -> dict[str, Any]:
     job = _job(owner)
     with _lock:
         status = asdict(job)
+        results = list(job.results)
+        compare = job.compare
+    status["resultsTotal"] = len(results)
+    status["results"] = results[-30:]
+    if compare and len(compare.get("tables") or []) > 80:
+        issues = [t for t in compare["tables"] if t.get("status") not in {"ok", None}]
+        status["compare"] = {
+            "schema": compare.get("schema"),
+            "tableCount": len(compare["tables"]),
+            "issueCount": len(issues),
+            "tables": issues[:80],
+        }
     status["thick"] = {
         "enabled": bool(_thick_state["enabled"]),
         "libDir": _thick_state["lib_dir"],
@@ -130,7 +145,9 @@ def request_stop(owner: str | None) -> None:
         if not job.running:
             raise ValueError("No DB sync is currently running.")
         job.cancel_requested = True
-        job.message = "Stop requested..."
+        where = f" while on {job.current_table}" if job.current_table else ""
+        action = f" ({job.current_action})" if job.current_action else ""
+        job.message = f"Stop requested{where}{action}"
 
 
 def _require_oracledb():
@@ -471,6 +488,7 @@ def compare_tables(
     target: OracleEndpoint,
     schema: str,
     tables: list[str] | None = None,
+    on_table=None,
 ) -> dict[str, Any]:
     owner = _quote_ident(schema)
     with _connect(source) as src, _connect(target) as tgt:
@@ -478,7 +496,9 @@ def compare_tables(
         tgt_tables = set(list_tables(target, owner))
         selected = [_quote_ident(t) for t in (tables or sorted(src_tables))]
         report = []
-        for table in selected:
+        for index, table in enumerate(selected, start=1):
+            if on_table and on_table(index, len(selected), table) is False:
+                break
             item: dict[str, Any] = {
                 "table": table,
                 "sourceExists": table in src_tables,
@@ -578,7 +598,7 @@ def _add_missing_columns(conn, schema: str, table: str, missing: list[dict[str, 
     return applied
 
 
-def _copy_table(src_conn, tgt_conn, schema: str, table: str, *, replace_data: bool, batch_size: int = 500) -> dict[str, Any]:
+def _copy_table(src_conn, tgt_conn, schema: str, table: str, *, replace_data: bool, batch_size: int = 500, on_rows=None) -> dict[str, Any]:
     owner = _quote_ident(schema)
     table_name = _quote_ident(table)
     src_cols = _columns(src_conn, owner, table_name)
@@ -605,6 +625,8 @@ def _copy_table(src_conn, tgt_conn, schema: str, table: str, *, replace_data: bo
             rows,
         )
         inserted += len(rows)
+        if on_rows:
+            on_rows(inserted, deleted)
     tgt_conn.commit()
     return {"deleted": deleted, "inserted": inserted, "columns": shared}
 
@@ -626,9 +648,12 @@ def start_sync(
         job.running = True
         job.cancel_requested = False
         job.phase = "starting"
+        job.current_table = ""
+        job.current_action = "starting"
         job.message = "Starting DB sync..."
         job.completed = 0
         job.total = len(tables)
+        job.rows_copied = 0
         job.results = []
         job.compare = None
     threading.Thread(
@@ -649,41 +674,73 @@ def _run_sync(
     replace_data: bool,
 ) -> None:
     job = _job(owner)
+
+    def note(action: str, table: str, index: int, total: int, *, rows: int = 0) -> bool:
+        with _lock:
+            job.phase = action
+            job.current_action = action
+            job.current_table = f"{schema_name}.{table}" if table else ""
+            job.completed = max(0, index - 1)
+            job.total = total
+            job.rows_copied = rows
+            label = job.current_table or "schemas"
+            stop = "Stop requested — " if job.cancel_requested else ""
+            extra = f", {rows} row(s) copied" if rows else ""
+            job.message = f"{stop}{action} {index}/{total}: {label}{extra}"
+            return not job.cancel_requested
+
     try:
         schema_name = _quote_ident(schema)
         selected = [_quote_ident(t) for t in tables]
-        with _lock:
-            job.phase = "compare"
-            job.message = "Comparing source and target schemas..."
-        compare = compare_tables(source, target, schema_name, selected)
+        note("comparing", "", 0, len(selected))
+
+        def on_compare(index: int, total: int, table: str) -> bool:
+            return note("comparing", table, index, total)
+
+        compare = compare_tables(source, target, schema_name, selected, on_table=on_compare)
         with _lock:
             job.compare = compare
+            stopped = job.cancel_requested
+        if stopped:
+            with _lock:
+                job.message = f"Stopped during compare at {job.current_table or 'start'} ({job.completed}/{job.total})"
+            return
         missing_target_tables = [t["table"] for t in compare["tables"] if t["status"] == "missing_on_target"]
         if missing_target_tables:
+            shown = ", ".join(missing_target_tables[:8])
+            more = f" (+{len(missing_target_tables) - 8} more)" if len(missing_target_tables) > 8 else ""
             raise ValueError(
                 "These tables exist on source but not on target (create them first): "
-                + ", ".join(missing_target_tables)
+                + shown
+                + more
             )
         with _connect(source) as src_conn, _connect(target) as tgt_conn:
             edges = _fk_edges(src_conn, schema_name, set(selected))
             ordered = _topo_sort(selected, edges)
-            with _lock:
-                job.total = len(ordered)
-                job.phase = "sync"
-                job.message = f"Copying {len(ordered)} table(s)..."
             for index, table in enumerate(ordered, start=1):
-                with _lock:
-                    if job.cancel_requested:
-                        job.message = f"Stopped after {index - 1} of {len(ordered)} tables"
-                        break
-                    job.completed = index - 1
-                    job.message = f"Syncing {index}/{len(ordered)}: {schema_name}.{table}"
-                table_cmp = next(t for t in compare["tables"] if t["table"] == table)
+                if not note("syncing", table, index, len(ordered)):
+                    with _lock:
+                        job.message = f"Stopped before {schema_name}.{table} ({index - 1}/{len(ordered)})"
+                    break
+                table_cmp = next((t for t in compare["tables"] if t["table"] == table), None)
                 added: list[str] = []
-                if add_missing_columns and table_cmp.get("missingColumns"):
+                if add_missing_columns and table_cmp and table_cmp.get("missingColumns"):
+                    note("adding columns", table, index, len(ordered))
                     added = _add_missing_columns(tgt_conn, schema_name, table, table_cmp["missingColumns"])
+
+                def on_rows(inserted: int, _deleted: int, _table=table, _index=index, _total=len(ordered)) -> None:
+                    note("syncing", _table, _index, _total, rows=inserted)
+
                 try:
-                    stats = _copy_table(src_conn, tgt_conn, schema_name, table, replace_data=replace_data)
+                    note("syncing", table, index, len(ordered))
+                    stats = _copy_table(
+                        src_conn,
+                        tgt_conn,
+                        schema_name,
+                        table,
+                        replace_data=replace_data,
+                        on_rows=on_rows,
+                    )
                     result = {
                         "table": table,
                         "success": True,
@@ -699,17 +756,22 @@ def _run_sync(
                 with _lock:
                     job.results.append(result)
                     job.completed = index
+                    job.current_table = f"{schema_name}.{table}"
+                    job.message = f"Finished {schema_name}.{table} ({index}/{len(ordered)}): {result['message']}"
         with _lock:
             if not job.cancel_requested:
                 ok = sum(1 for r in job.results if r.get("success"))
+                job.current_action = "finished"
                 job.message = f"Finished: {ok} succeeded, {len(job.results) - ok} failed"
     except Exception as exc:
         LOG.exception("DB sync failed")
         with _lock:
-            job.message = f"DB sync failed: {exc}"
-            job.results.append({"table": "*", "success": False, "message": str(exc)})
+            where = f" on {job.current_table}" if job.current_table else ""
+            job.message = f"DB sync failed{where}: {exc}"
+            job.results.append({"table": job.current_table or "*", "success": False, "message": str(exc)})
     finally:
         with _lock:
             job.running = False
             job.cancel_requested = False
             job.phase = "idle"
+            job.current_action = job.current_action if job.current_action == "finished" else "idle"
