@@ -462,7 +462,7 @@ def _columns(conn, schema: str, table: str) -> list[dict[str, Any]]:
     return cols
 
 
-def _column_ddl(col: dict[str, Any]) -> str:
+def _column_ddl(col: dict[str, Any], *, force_null: bool = True) -> str:
     name = _quote_ident(col["name"])
     dtype = str(col["dataType"] or "VARCHAR2").upper()
     length = col.get("dataLength")
@@ -480,7 +480,7 @@ def _column_ddl(col: dict[str, Any]) -> str:
             type_sql = f"{dtype}({int(precision)},{int(scale)})"
     else:
         type_sql = dtype
-    return f"{name} {type_sql} NULL"
+    return f"{name} {type_sql} {'NULL' if force_null or col.get('nullable', True) else 'NOT NULL'}"
 
 
 def compare_tables(
@@ -585,6 +585,19 @@ def _topo_sort(tables: list[str], edges: list[tuple[str, str]]) -> list[str]:
     return ordered + leftover
 
 
+def _create_table(conn, schema: str, table: str, columns: list[dict[str, Any]]) -> list[str]:
+    owner = _quote_ident(schema)
+    table_name = _quote_ident(table)
+    ordered = sorted(columns, key=lambda col: col.get("columnId") or 0)
+    if not ordered:
+        raise ValueError(f"{owner}.{table_name} has no columns to create")
+    defs = ", ".join(_column_ddl(col, force_null=False) for col in ordered)
+    cur = conn.cursor()
+    cur.execute(f"CREATE TABLE {owner}.{table_name} ({defs})")
+    conn.commit()
+    return [col["name"] for col in ordered]
+
+
 def _add_missing_columns(conn, schema: str, table: str, missing: list[dict[str, Any]]) -> list[str]:
     owner = _quote_ident(schema)
     table_name = _quote_ident(table)
@@ -639,6 +652,7 @@ def start_sync(
     schema: str,
     tables: list[str],
     add_missing_columns: bool = True,
+    create_missing_tables: bool = True,
     replace_data: bool = False,
 ) -> None:
     job = _job(owner)
@@ -658,7 +672,7 @@ def start_sync(
         job.compare = None
     threading.Thread(
         target=_run_sync,
-        args=(owner, source, target, schema, tables, add_missing_columns, replace_data),
+        args=(owner, source, target, schema, tables, add_missing_columns, create_missing_tables, replace_data),
         name="db-sync",
         daemon=True,
     ).start()
@@ -671,6 +685,7 @@ def _run_sync(
     schema: str,
     tables: list[str],
     add_missing_columns: bool,
+    create_missing_tables: bool,
     replace_data: bool,
 ) -> None:
     job = _job(owner)
@@ -705,15 +720,6 @@ def _run_sync(
             with _lock:
                 job.message = f"Stopped during compare at {job.current_table or 'start'} ({job.completed}/{job.total})"
             return
-        missing_target_tables = [t["table"] for t in compare["tables"] if t["status"] == "missing_on_target"]
-        if missing_target_tables:
-            shown = ", ".join(missing_target_tables[:8])
-            more = f" (+{len(missing_target_tables) - 8} more)" if len(missing_target_tables) > 8 else ""
-            raise ValueError(
-                "These tables exist on source but not on target (create them first): "
-                + shown
-                + more
-            )
         with _connect(source) as src_conn, _connect(target) as tgt_conn:
             edges = _fk_edges(src_conn, schema_name, set(selected))
             ordered = _topo_sort(selected, edges)
@@ -723,15 +729,44 @@ def _run_sync(
                         job.message = f"Stopped before {schema_name}.{table} ({index - 1}/{len(ordered)})"
                     break
                 table_cmp = next((t for t in compare["tables"] if t["table"] == table), None)
-                added: list[str] = []
-                if add_missing_columns and table_cmp and table_cmp.get("missingColumns"):
-                    note("adding columns", table, index, len(ordered))
-                    added = _add_missing_columns(tgt_conn, schema_name, table, table_cmp["missingColumns"])
+                if table_cmp and table_cmp.get("status") == "missing_on_source":
+                    result = {
+                        "table": table,
+                        "success": False,
+                        "addedColumns": [],
+                        "message": "Table does not exist on source.",
+                    }
+                    with _lock:
+                        job.results.append(result)
+                        job.completed = index
+                        job.message = f"Skipped {schema_name}.{table} ({index}/{len(ordered)}): {result['message']}"
+                    continue
+                if table_cmp and table_cmp.get("status") == "missing_on_target" and not create_missing_tables:
+                    result = {
+                        "table": table,
+                        "success": False,
+                        "addedColumns": [],
+                        "message": "Table does not exist on target. Enable Create missing tables on DEV.",
+                    }
+                    with _lock:
+                        job.results.append(result)
+                        job.completed = index
+                        job.message = f"Skipped {schema_name}.{table} ({index}/{len(ordered)}): {result['message']}"
+                    continue
 
                 def on_rows(inserted: int, _deleted: int, _table=table, _index=index, _total=len(ordered)) -> None:
                     note("syncing", _table, _index, _total, rows=inserted)
 
+                added: list[str] = []
+                created = False
                 try:
+                    if table_cmp and table_cmp.get("status") == "missing_on_target":
+                        note("creating table", table, index, len(ordered))
+                        added = _create_table(tgt_conn, schema_name, table, table_cmp.get("missingColumns") or [])
+                        created = True
+                    elif add_missing_columns and table_cmp and table_cmp.get("missingColumns"):
+                        note("adding columns", table, index, len(ordered))
+                        added = _add_missing_columns(tgt_conn, schema_name, table, table_cmp["missingColumns"])
                     note("syncing", table, index, len(ordered))
                     stats = _copy_table(
                         src_conn,
@@ -741,14 +776,19 @@ def _run_sync(
                         replace_data=replace_data,
                         on_rows=on_rows,
                     )
+                    detail = f"Inserted {stats['inserted']} row(s)"
+                    if stats["deleted"]:
+                        detail += f", deleted {stats['deleted']}"
+                    if created:
+                        detail += f", created table with {len(added)} column(s)"
+                    elif added:
+                        detail += f", added columns {', '.join(added)}"
                     result = {
                         "table": table,
                         "success": True,
                         "addedColumns": added,
                         **stats,
-                        "message": f"Inserted {stats['inserted']} row(s)"
-                        + (f", deleted {stats['deleted']}" if stats["deleted"] else "")
-                        + (f", added columns {', '.join(added)}" if added else ""),
+                        "message": detail,
                     }
                 except Exception as exc:
                     LOG.exception("DB sync failed for %s.%s", schema_name, table)

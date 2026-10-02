@@ -86,7 +86,7 @@ PAGES: tuple[PageDef, ...] = (
             FunctionDef("view", "View"),
             FunctionDef("compare", "Compare schemas"),
             FunctionDef("sync", "Run sync"),
-            FunctionDef("alter_schema", "Add missing columns"),
+            FunctionDef("alter_schema", "Create tables and add columns"),
         ),
     ),
     PageDef(

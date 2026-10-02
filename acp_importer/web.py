@@ -212,6 +212,7 @@ class DbSyncStartBody(BaseModel):
     owner_schema: str = Field(alias="schema")
     tables: list[str]
     addMissingColumns: bool = True
+    createMissingTables: bool = True
     replaceData: bool = False
 
     model_config = {"populate_by_name": True}
@@ -1473,7 +1474,7 @@ def api_db_sync_start(body: DbSyncStartBody, http_request: Request) -> dict[str,
 
     if not body.tables:
         raise HTTPException(status_code=400, detail="Select at least one table")
-    if body.addMissingColumns:
+    if body.addMissingColumns or body.createMissingTables:
         assert_function(http_request, "db_sync", "alter_schema")
     try:
         db_sync_start(
@@ -1483,6 +1484,7 @@ def api_db_sync_start(body: DbSyncStartBody, http_request: Request) -> dict[str,
             schema=body.owner_schema,
             tables=body.tables,
             add_missing_columns=body.addMissingColumns,
+            create_missing_tables=body.createMissingTables,
             replace_data=body.replaceData,
         )
     except ValueError as exc:

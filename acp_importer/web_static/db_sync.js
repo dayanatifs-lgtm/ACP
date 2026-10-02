@@ -22,6 +22,7 @@ const form = {
   thick: true,
   schema: "",
   addMissingColumns: true,
+  createMissingTables: true,
   replaceData: false,
 };
 
@@ -75,6 +76,7 @@ function readForm() {
   form.thick = checked("opt-thick");
   form.schema = get("schema").trim();
   form.addMissingColumns = checked("opt-add-cols");
+  form.createMissingTables = checked("opt-create-tables");
   form.replaceData = checked("opt-replace");
 }
 
@@ -173,7 +175,7 @@ function render() {
       <h1>DB Sync</h1>
       <p class="subtitle">Compare source/target tables, optionally add missing columns on DEV, then copy rows in FK-aware order. Passwords stay in memory only (not saved).</p>
     </header>
-    <p class="help">This is a logical sync (python-oracledb), not OS Data Pump. Tables that do not exist on DEV must be created first. Prefer a small table list before full schema copy. DPY-4011 usually means Native Network Encryption — keep thick mode on and install Oracle Instant Client on the app server.</p>
+    <p class="help">This is a logical sync (python-oracledb), not OS Data Pump. Missing tables can be created on DEV from the source columns, then rows are copied. Prefer a small table list before a full schema copy.</p>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}
     ${info ? `<p class="success">${esc(info)}</p>` : ""}
     <section class="card settings">
@@ -196,6 +198,7 @@ function render() {
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
       </div>
       ${tableList}
+      <label class="check-row"><input id="opt-create-tables" type="checkbox" ${form.createMissingTables ? "checked" : ""}/> Create missing tables on DEV</label>
       <label class="check-row"><input id="opt-add-cols" type="checkbox" ${form.addMissingColumns ? "checked" : ""}/> Add missing columns on DEV (nullable)</label>
       <label class="check-row"><input id="opt-replace" type="checkbox" ${form.replaceData ? "checked" : ""}/> Replace target rows (DELETE then INSERT)</label>
       <div class="buttons">
@@ -354,6 +357,7 @@ async function startSync() {
         schema: form.schema,
         tables: tableList,
         addMissingColumns: form.addMissingColumns,
+        createMissingTables: form.createMissingTables,
         replaceData: form.replaceData,
       }),
     });
