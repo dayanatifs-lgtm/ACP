@@ -25,6 +25,40 @@ from typing import Any
 LOG = logging.getLogger("DbSync")
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
+ROW_LIMIT = 1000
+
+_MODIFY_NAMES = (
+    "LAST_UPDATED",
+    "LAST_UPDATE",
+    "LAST_UPDATED_DATE",
+    "LAST_UPDATE_DATE",
+    "UPDATED_AT",
+    "UPDATED_DATE",
+    "UPDATE_DATE",
+    "MODIFIED_AT",
+    "MODIFIED_DATE",
+    "MODIFY_DATE",
+    "CHANGED_DATE",
+    "CHANGE_DATE",
+    "DT_CHG",
+    "LAST_CHANGED",
+    "ROWVERSION",
+    "OBJVERSION",
+)
+_CREATE_NAMES = (
+    "CREATED_AT",
+    "CREATED_DATE",
+    "CREATE_DATE",
+    "CREATION_DATE",
+    "DT_CRE",
+    "INSERTED_AT",
+    "INSERT_DATE",
+    "REG_DATE",
+    "ENTERED_DATE",
+    "CREATED",
+)
+_ORDER_NAME_HINTS = ("UPDATE", "UPDATED", "MODIF", "CHANGE", "CHANGED", "CREATE", "CREATED", "ROWVERSION", "OBJVERSION")
+_UNRELIABLE_KEY_NAMES = {"ROWKEY", "OBJKEY", "GUID", "UUID", "ROWID"}
 
 _thick_lock = threading.Lock()
 _thick_state: dict[str, Any] = {
@@ -617,24 +651,98 @@ def _topo_sort(tables: list[str], edges: list[tuple[str, str]]) -> list[str]:
     return ordered + leftover
 
 
-def classify_retry(source_count: int | None, target_count: int | None) -> str:
+def classify_retry(source_count: int | None, target_count: int | None, limit: int = ROW_LIMIT) -> str:
     """Decide whether a table still needs copying.
 
-    complete / target_ahead are left unchanged.
-    missing_target and incomplete are retried.
+    Counts may be capped at limit+1, which means "more than limit rows".
+    A target that already has the full table, or at least `limit` rows, is left unchanged.
     """
     if source_count is None:
         return "missing_source"
     if target_count is None:
         return "missing_target"
-    if target_count == source_count:
-        return "complete"
-    if target_count > source_count:
+    needed = source_count if source_count <= limit else limit
+    if target_count > needed:
         return "target_ahead"
+    if target_count == needed:
+        return "complete"
     return "incomplete"
 
 
-def _row_count(conn, schema: str, table: str) -> int | None:
+def _is_temporal(data_type: str) -> bool:
+    dtype = (data_type or "").upper()
+    return dtype == "DATE" or dtype.startswith("TIMESTAMP")
+
+
+def _is_numeric(data_type: str) -> bool:
+    dtype = (data_type or "").upper()
+    return dtype in {"NUMBER", "FLOAT", "INTEGER", "INT", "BINARY_DOUBLE", "BINARY_FLOAT"} or dtype.startswith("NUMBER")
+
+
+def choose_order_column(
+    columns: list[dict[str, Any]],
+    pk_columns: list[str] | None = None,
+) -> dict[str, Any]:
+    """Pick a column that can identify the latest rows, without assuming one date name."""
+    by_name = {str(col.get("name") or "").upper(): col for col in columns if col.get("name")}
+
+    def usable(name: str) -> bool:
+        col = by_name.get(name)
+        if not col or name in _UNRELIABLE_KEY_NAMES:
+            return False
+        dtype = str(col.get("dataType") or "")
+        return _is_temporal(dtype) or _is_numeric(dtype)
+
+    def pick(names: tuple[str, ...], reason: str) -> dict[str, Any] | None:
+        for name in names:
+            if usable(name):
+                return {"columns": [name], "reliable": True, "reason": reason}
+        return None
+
+    found = pick(_MODIFY_NAMES, "modification column") or pick(_CREATE_NAMES, "creation column")
+    if found:
+        return found
+
+    hinted: list[tuple[int, str]] = []
+    for name, col in by_name.items():
+        if not usable(name):
+            continue
+        if any(hint in name for hint in _ORDER_NAME_HINTS):
+            hinted.append((0 if _is_temporal(str(col.get("dataType") or "")) else 1, name))
+    if hinted:
+        hinted.sort()
+        return {"columns": [hinted[0][1]], "reliable": True, "reason": "date or version column"}
+
+    pk = [str(name).upper() for name in (pk_columns or []) if str(name).upper() in by_name]
+    if pk and all(usable(name) for name in pk):
+        return {"columns": pk, "reliable": True, "reason": "primary key"}
+
+    return {"columns": [], "reliable": False, "reason": "no date, version, sequence, or key column"}
+
+
+def _primary_key_columns(conn, schema: str, table: str) -> list[str]:
+    owner = _quote_ident(schema)
+    table_name = _quote_ident(table)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        select cc.column_name
+        from all_constraints c
+        join all_cons_columns cc
+          on c.owner = cc.owner
+         and c.constraint_name = cc.constraint_name
+        where c.owner = :owner
+          and c.table_name = :table_name
+          and c.constraint_type = 'P'
+        order by cc.position
+        """,
+        {"owner": owner, "table_name": table_name},
+    )
+    return [str(row[0]).upper() for row in cur.fetchall()]
+
+
+def _row_count(conn, schema: str, table: str, cap: int = ROW_LIMIT + 1) -> int | None:
+    """Count rows only up to cap. cap means the table has at least that many rows."""
     owner = _quote_ident(schema)
     table_name = _quote_ident(table)
     cur = conn.cursor()
@@ -648,7 +756,10 @@ def _row_count(conn, schema: str, table: str) -> int | None:
     )
     if cur.fetchone() is None:
         return None
-    cur.execute(f"select count(*) from {owner}.{table_name}")
+    cur.execute(
+        f"select count(*) from (select 1 from {owner}.{table_name} where rownum <= :cap)",
+        {"cap": int(cap)},
+    )
     row = cur.fetchone()
     return int(row[0] if row else 0)
 
@@ -689,13 +800,38 @@ def _copy_table(src_conn, tgt_conn, schema: str, table: str, *, replace_data: bo
         raise ValueError(f"{owner}.{table_name} has no shared columns to copy")
     col_list = ", ".join(shared)
     placeholders = ", ".join(f":{i + 1}" for i in range(len(shared)))
+    order = choose_order_column(src_cols, _primary_key_columns(src_conn, owner, table_name))
+    order_cols = order["columns"]
+    if order_cols:
+        order_sql = ", ".join(f"{_quote_ident(name)} DESC NULLS LAST" for name in order_cols)
+        inner_cols = list(shared)
+        for name in order_cols:
+            if name not in inner_cols:
+                inner_cols.append(name)
+        inner_list = ", ".join(inner_cols)
+        select_sql = f"""
+            SELECT {col_list} FROM (
+                SELECT {inner_list}
+                FROM {owner}.{table_name}
+                ORDER BY {order_sql}
+            ) WHERE ROWNUM <= :row_limit
+        """
+    else:
+        LOG.warning(
+            "%s.%s has no reliable order column (%s); copying up to %s rows without ORDER BY",
+            owner,
+            table_name,
+            order["reason"],
+            ROW_LIMIT,
+        )
+        select_sql = f"SELECT {col_list} FROM {owner}.{table_name} WHERE ROWNUM <= :row_limit"
     src = src_conn.cursor()
     tgt = tgt_conn.cursor()
     deleted = 0
     if replace_data:
         tgt.execute(f"DELETE FROM {owner}.{table_name}")
         deleted = tgt.rowcount if tgt.rowcount and tgt.rowcount > 0 else 0
-    src.execute(f"SELECT {col_list} FROM {owner}.{table_name}")
+    src.execute(select_sql, {"row_limit": ROW_LIMIT})
     inserted = 0
     while True:
         rows = src.fetchmany(batch_size)
@@ -709,7 +845,15 @@ def _copy_table(src_conn, tgt_conn, schema: str, table: str, *, replace_data: bo
         if on_rows:
             on_rows(inserted, deleted)
     tgt_conn.commit()
-    return {"deleted": deleted, "inserted": inserted, "columns": shared}
+    return {
+        "deleted": deleted,
+        "inserted": inserted,
+        "columns": shared,
+        "rowLimit": ROW_LIMIT,
+        "orderColumn": ", ".join(order_cols),
+        "orderReliable": bool(order["reliable"]),
+        "orderReason": order["reason"],
+    }
 
 
 def start_sync(
@@ -916,6 +1060,10 @@ def _run_sync(
                         on_rows=on_rows,
                     )
                     detail = f"Inserted {stats['inserted']} row(s)"
+                    if stats.get("orderColumn"):
+                        detail += f", latest by {stats['orderColumn']} (max {stats['rowLimit']})"
+                    elif stats.get("orderReliable") is False:
+                        detail += f", first {stats['inserted']} rows only; no reliable order column"
                     if stats["deleted"]:
                         detail += f", deleted {stats['deleted']} partial row(s) before reload"
                     if created:

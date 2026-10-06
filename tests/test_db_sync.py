@@ -15,6 +15,7 @@ from acp_importer.db_sync import (
     _net_config_dir,
     _quote_ident,
     _should_retry_connect_mode,
+    choose_order_column,
     classify_retry,
     test_connection,
 )
@@ -52,6 +53,37 @@ class DbSyncHelperTests(unittest.TestCase):
         self.assertEqual(classify_retry(10, 4), "incomplete")
         self.assertEqual(classify_retry(10, None), "missing_target")
         self.assertEqual(classify_retry(None, 0), "missing_source")
+        self.assertEqual(classify_retry(1001, 1000), "complete")
+        self.assertEqual(classify_retry(1001, 1001), "target_ahead")
+        self.assertEqual(classify_retry(1001, 20), "incomplete")
+
+    def test_order_column_prefers_table_specific_dates(self):
+        columns = [
+            {"name": "ROWKEY", "dataType": "VARCHAR2"},
+            {"name": "DESCRIPTION", "dataType": "VARCHAR2"},
+            {"name": "DT_CRE", "dataType": "DATE"},
+            {"name": "QTY", "dataType": "NUMBER"},
+        ]
+        chosen = choose_order_column(columns, pk_columns=["ROWKEY"])
+        self.assertEqual(chosen["columns"], ["DT_CRE"])
+        self.assertTrue(chosen["reliable"])
+
+    def test_order_column_uses_numeric_primary_key(self):
+        columns = [
+            {"name": "ACTIVITY_SEQ", "dataType": "NUMBER"},
+            {"name": "NOTE", "dataType": "VARCHAR2"},
+        ]
+        chosen = choose_order_column(columns, pk_columns=["ACTIVITY_SEQ"])
+        self.assertEqual(chosen["columns"], ["ACTIVITY_SEQ"])
+
+    def test_order_column_logs_unreliable_fallback(self):
+        columns = [
+            {"name": "ROWKEY", "dataType": "VARCHAR2"},
+            {"name": "DESCRIPTION", "dataType": "VARCHAR2"},
+        ]
+        chosen = choose_order_column(columns, pk_columns=["ROWKEY"])
+        self.assertEqual(chosen["columns"], [])
+        self.assertFalse(chosen["reliable"])
 
 
 @unittest.skipUnless(os.environ.get("ACP_ORACLE_PASSWORD"), "Set ACP_ORACLE_PASSWORD to run live CFG tests")

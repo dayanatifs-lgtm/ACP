@@ -176,7 +176,7 @@ function render() {
       <h1>DB Sync</h1>
       <p class="subtitle">Compare source/target tables, optionally add missing columns on DEV, then copy rows in FK-aware order. Passwords stay in memory only (not saved).</p>
     </header>
-    <p class="help">This is a logical sync (python-oracledb), not OS Data Pump. Missing tables can be created on DEV from the source columns, then rows are copied. Prefer a small table list before a full schema copy.</p>
+    <p class="help">Each table copies at most 1,000 rows. Smaller tables are copied in full. Larger tables copy the latest 1,000 rows, using that table’s own date, version, or key column. If no such column exists, the first 1,000 rows are copied and the table is logged as unordered.</p>
     ${error ? `<p class="error">${esc(error)}</p>` : ""}
     ${info ? `<p class="success">${esc(info)}</p>` : ""}
     <section class="card settings">
