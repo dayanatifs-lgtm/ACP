@@ -210,10 +210,11 @@ class DbSyncStartBody(BaseModel):
     source: OracleEndpointRequest
     target: OracleEndpointRequest
     owner_schema: str = Field(alias="schema")
-    tables: list[str]
+    tables: list[str] = []
     addMissingColumns: bool = True
     createMissingTables: bool = True
     replaceData: bool = False
+    retryFailed: bool = False
 
     model_config = {"populate_by_name": True}
 
@@ -1472,7 +1473,7 @@ def api_db_sync_compare(body: DbSyncCompareBody) -> dict[str, Any]:
 def api_db_sync_start(body: DbSyncStartBody, http_request: Request) -> dict[str, str]:
     from .auth.permissions import assert_function
 
-    if not body.tables:
+    if not body.tables and not body.retryFailed:
         raise HTTPException(status_code=400, detail="Select at least one table")
     if body.addMissingColumns or body.createMissingTables:
         assert_function(http_request, "db_sync", "alter_schema")
@@ -1486,6 +1487,7 @@ def api_db_sync_start(body: DbSyncStartBody, http_request: Request) -> dict[str,
             add_missing_columns=body.addMissingColumns,
             create_missing_tables=body.createMissingTables,
             replace_data=body.replaceData,
+            retry_failed=body.retryFailed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

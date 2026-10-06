@@ -10,5 +10,6 @@ deliveries.json
 import_failures.json
 .acp_meta_cache/
 .acp_clone_state.json
+.acp_db_sync/
 
 workspaces/

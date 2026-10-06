@@ -15,6 +15,7 @@ from acp_importer.db_sync import (
     _net_config_dir,
     _quote_ident,
     _should_retry_connect_mode,
+    classify_retry,
     test_connection,
 )
 
@@ -44,6 +45,13 @@ class DbSyncHelperTests(unittest.TestCase):
     def test_dbhome_detection(self):
         self.assertTrue(_is_dbhome_client(r"C:\app\Administrator\product\19.0.0\dbhome_1\bin"))
         self.assertFalse(_is_dbhome_client(r"C:\oracle\instantclient_19_21"))
+
+    def test_retry_skips_complete_tables(self):
+        self.assertEqual(classify_retry(10, 10), "complete")
+        self.assertEqual(classify_retry(10, 12), "target_ahead")
+        self.assertEqual(classify_retry(10, 4), "incomplete")
+        self.assertEqual(classify_retry(10, None), "missing_target")
+        self.assertEqual(classify_retry(None, 0), "missing_source")
 
 
 @unittest.skipUnless(os.environ.get("ACP_ORACLE_PASSWORD"), "Set ACP_ORACLE_PASSWORD to run live CFG tests")

@@ -147,6 +147,7 @@ function statusBlock() {
     <p class="${status.running ? "progress" : ""}">${esc(status.message || "Ready")}</p>
     <p><b>Current table:</b> ${esc(table)}</p>
     <p><b>Step:</b> ${esc(action)}${progress ? ` · ${esc(progress)}` : ""}${rows ? ` · ${rows} row(s) copied on this table` : ""}</p>
+    ${(status.succeededCount || status.failedCount || status.skippedCount) ? `<p><b>Last result:</b> ${status.succeededCount || 0} copied, ${status.skippedCount || 0} left unchanged, ${status.failedCount || 0} failed</p>` : ""}
   </section>`;
 }
 
@@ -200,11 +201,13 @@ function render() {
       ${tableList}
       <label class="check-row"><input id="opt-create-tables" type="checkbox" ${form.createMissingTables ? "checked" : ""}/> Create missing tables on DEV</label>
       <label class="check-row"><input id="opt-add-cols" type="checkbox" ${form.addMissingColumns ? "checked" : ""}/> Add missing columns on DEV (nullable)</label>
-      <label class="check-row"><input id="opt-replace" type="checkbox" ${form.replaceData ? "checked" : ""}/> Replace target rows (DELETE then INSERT)</label>
+      <label class="check-row"><input id="opt-replace" type="checkbox" ${form.replaceData ? "checked" : ""}/> Replace target rows (DELETE then INSERT) — full sync only</label>
       <div class="buttons">
         <button type="button" class="primary" id="start-sync" ${status.running || !selected.size ? "disabled" : ""}>${status.running ? "Syncing…" : "Start sync"}</button>
+        <button type="button" class="secondary" id="retry-failed" ${status.running || !((status.failedCount || 0) > 0 || (status.selectedCount || 0) > 0) ? "disabled" : ""}>Retry failed only</button>
         <button type="button" class="danger" id="stop-sync" ${!status.running ? "disabled" : ""}>Stop</button>
       </div>
+      <p class="help">Retry checks source and target row counts. Tables that already match are left unchanged and are not deleted. Only failed or short tables are copied again.</p>
     </section>
     ${statusBlock()}
     ${compareBlock()}
@@ -217,7 +220,8 @@ function render() {
   document.getElementById("load-schemas").onclick = loadSchemas;
   document.getElementById("load-tables").onclick = loadTables;
   document.getElementById("compare").onclick = compareSelected;
-  document.getElementById("start-sync").onclick = startSync;
+  document.getElementById("start-sync").onclick = () => startSync(false);
+  document.getElementById("retry-failed").onclick = () => startSync(true);
   document.getElementById("stop-sync").onclick = stopSync;
   const selAll = document.getElementById("select-all");
   const selNone = document.getElementById("select-none");
@@ -338,11 +342,11 @@ async function compareSelected() {
   render();
 }
 
-async function startSync() {
+async function startSync(retryFailed) {
   error = "";
   info = "";
   const tableList = selectedTables();
-  if (!tableList.length) {
+  if (!retryFailed && !tableList.length) {
     error = "Select at least one table";
     render();
     return;
@@ -358,10 +362,13 @@ async function startSync() {
         tables: tableList,
         addMissingColumns: form.addMissingColumns,
         createMissingTables: form.createMissingTables,
-        replaceData: form.replaceData,
+        replaceData: retryFailed ? false : form.replaceData,
+        retryFailed: !!retryFailed,
       }),
     });
-    info = "Sync started.";
+    info = retryFailed
+      ? "Retry started. Tables that already match are skipped."
+      : "Sync started.";
     await refreshStatus();
   } catch (e) {
     error = e.message;

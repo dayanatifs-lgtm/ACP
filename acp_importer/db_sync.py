@@ -13,6 +13,7 @@ with DPY-4011/DPY-6005; enable thick mode (Oracle Instant Client) for those DBs.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -98,12 +99,39 @@ class SyncJob:
     completed: int = 0
     total: int = 0
     rows_copied: int = 0
+    selected_tables: list[str] = field(default_factory=list)
     results: list[dict[str, Any]] = field(default_factory=list)
     compare: dict[str, Any] | None = None
 
 
 _jobs: dict[str, SyncJob] = {}
 _lock = threading.RLock()
+_STATE_DIR = Path(__file__).resolve().parents[1] / ".acp_db_sync"
+
+
+def _state_path(owner: str | None) -> Path:
+    safe = re.sub(r"[^a-z0-9_.@-]+", "_", (owner or "anonymous").strip().lower()) or "anonymous"
+    return _STATE_DIR / f"{safe}.json"
+
+
+def _save_selection(owner: str | None, schema: str, tables: list[str]) -> None:
+    path = _state_path(owner)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema": schema, "tables": tables}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_selection(owner: str | None) -> list[str]:
+    path = _state_path(owner)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [str(name) for name in (data.get("tables") or [])]
 
 
 def _job(owner: str | None) -> SyncJob:
@@ -120,7 +148,11 @@ def get_status(owner: str | None) -> dict[str, Any]:
         status = asdict(job)
         results = list(job.results)
         compare = job.compare
+    status["selectedCount"] = len(status.pop("selected_tables", []) or []) or len(_load_selection(owner))
     status["resultsTotal"] = len(results)
+    status["succeededCount"] = sum(1 for row in results if row.get("success") and not row.get("skipped"))
+    status["failedCount"] = sum(1 for row in results if not row.get("success"))
+    status["skippedCount"] = sum(1 for row in results if row.get("skipped"))
     status["results"] = results[-30:]
     if compare and len(compare.get("tables") or []) > 80:
         issues = [t for t in compare["tables"] if t.get("status") not in {"ok", None}]
@@ -585,6 +617,42 @@ def _topo_sort(tables: list[str], edges: list[tuple[str, str]]) -> list[str]:
     return ordered + leftover
 
 
+def classify_retry(source_count: int | None, target_count: int | None) -> str:
+    """Decide whether a table still needs copying.
+
+    complete / target_ahead are left unchanged.
+    missing_target and incomplete are retried.
+    """
+    if source_count is None:
+        return "missing_source"
+    if target_count is None:
+        return "missing_target"
+    if target_count == source_count:
+        return "complete"
+    if target_count > source_count:
+        return "target_ahead"
+    return "incomplete"
+
+
+def _row_count(conn, schema: str, table: str) -> int | None:
+    owner = _quote_ident(schema)
+    table_name = _quote_ident(table)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        select 1
+        from all_tables
+        where owner = :owner and table_name = :table_name
+        """,
+        {"owner": owner, "table_name": table_name},
+    )
+    if cur.fetchone() is None:
+        return None
+    cur.execute(f"select count(*) from {owner}.{table_name}")
+    row = cur.fetchone()
+    return int(row[0] if row else 0)
+
+
 def _create_table(conn, schema: str, table: str, columns: list[dict[str, Any]]) -> list[str]:
     owner = _quote_ident(schema)
     table_name = _quote_ident(table)
@@ -654,25 +722,42 @@ def start_sync(
     add_missing_columns: bool = True,
     create_missing_tables: bool = True,
     replace_data: bool = False,
+    retry_failed: bool = False,
 ) -> None:
     job = _job(owner)
     with _lock:
         if job.running:
             raise ValueError("A DB sync is already running for your session.")
+        previous = list(job.selected_tables) or _load_selection(owner)
+        chosen = [_quote_ident(t) for t in (tables or previous)]
+        if not chosen:
+            raise ValueError("Select at least one table, or retry after a finished sync.")
+        _save_selection(owner, schema, chosen)
         job.running = True
         job.cancel_requested = False
         job.phase = "starting"
         job.current_table = ""
         job.current_action = "starting"
-        job.message = "Starting DB sync..."
+        job.message = "Checking which tables still need to be copied..." if retry_failed else "Starting DB sync..."
         job.completed = 0
-        job.total = len(tables)
+        job.total = len(chosen)
         job.rows_copied = 0
+        job.selected_tables = chosen
         job.results = []
         job.compare = None
     threading.Thread(
         target=_run_sync,
-        args=(owner, source, target, schema, tables, add_missing_columns, create_missing_tables, replace_data),
+        args=(
+            owner,
+            source,
+            target,
+            schema,
+            chosen,
+            add_missing_columns,
+            create_missing_tables,
+            replace_data,
+            retry_failed,
+        ),
         name="db-sync",
         daemon=True,
     ).start()
@@ -687,6 +772,7 @@ def _run_sync(
     add_missing_columns: bool,
     create_missing_tables: bool,
     replace_data: bool,
+    retry_failed: bool = False,
 ) -> None:
     job = _job(owner)
 
@@ -707,6 +793,59 @@ def _run_sync(
     try:
         schema_name = _quote_ident(schema)
         selected = [_quote_ident(t) for t in tables]
+        replace_partial: set[str] = set()
+        if retry_failed:
+            note("checking", "", 0, len(selected))
+            pending: list[str] = []
+            with _connect(source) as src_conn, _connect(target) as tgt_conn:
+                for index, table in enumerate(selected, start=1):
+                    if not note("checking", table, index, len(selected)):
+                        with _lock:
+                            job.message = (
+                                f"Stopped while checking {schema_name}.{table} ({index - 1}/{len(selected)})"
+                            )
+                        return
+                    kind = classify_retry(
+                        _row_count(src_conn, schema_name, table),
+                        _row_count(tgt_conn, schema_name, table),
+                    )
+                    if kind in {"complete", "target_ahead"}:
+                        message = (
+                            "Already fully synced (row counts match). Left unchanged."
+                            if kind == "complete"
+                            else "Target already has at least as many rows as source. Left unchanged."
+                        )
+                        with _lock:
+                            job.results.append(
+                                {"table": table, "success": True, "skipped": True, "message": message}
+                            )
+                            job.completed = index
+                            job.message = f"Skipping {schema_name}.{table} ({index}/{len(selected)}): {message}"
+                        continue
+                    if kind == "missing_source":
+                        with _lock:
+                            job.results.append(
+                                {
+                                    "table": table,
+                                    "success": False,
+                                    "message": "Table does not exist on source.",
+                                }
+                            )
+                            job.completed = index
+                        continue
+                    if kind == "incomplete":
+                        replace_partial.add(table)
+                    pending.append(table)
+            if not pending:
+                with _lock:
+                    skipped = sum(1 for row in job.results if row.get("skipped"))
+                    failed = sum(1 for row in job.results if not row.get("success"))
+                    job.current_action = "finished"
+                    job.completed = len(selected)
+                    job.message = f"Nothing to retry. {skipped} already complete and left unchanged, {failed} failed."
+                return
+            selected = pending
+
         note("comparing", "", 0, len(selected))
 
         def on_compare(index: int, total: int, table: str) -> bool:
@@ -773,12 +912,12 @@ def _run_sync(
                         tgt_conn,
                         schema_name,
                         table,
-                        replace_data=replace_data,
+                        replace_data=table in replace_partial if retry_failed else replace_data,
                         on_rows=on_rows,
                     )
                     detail = f"Inserted {stats['inserted']} row(s)"
                     if stats["deleted"]:
-                        detail += f", deleted {stats['deleted']}"
+                        detail += f", deleted {stats['deleted']} partial row(s) before reload"
                     if created:
                         detail += f", created table with {len(added)} column(s)"
                     elif added:
@@ -800,9 +939,16 @@ def _run_sync(
                     job.message = f"Finished {schema_name}.{table} ({index}/{len(ordered)}): {result['message']}"
         with _lock:
             if not job.cancel_requested:
-                ok = sum(1 for r in job.results if r.get("success"))
+                copied = sum(1 for row in job.results if row.get("success") and not row.get("skipped"))
+                skipped = sum(1 for row in job.results if row.get("skipped"))
+                failed = sum(1 for row in job.results if not row.get("success"))
                 job.current_action = "finished"
-                job.message = f"Finished: {ok} succeeded, {len(job.results) - ok} failed"
+                if retry_failed:
+                    job.message = (
+                        f"Retry finished: {copied} copied, {skipped} left unchanged, {failed} failed"
+                    )
+                else:
+                    job.message = f"Finished: {copied} succeeded, {failed} failed"
     except Exception as exc:
         LOG.exception("DB sync failed")
         with _lock:
