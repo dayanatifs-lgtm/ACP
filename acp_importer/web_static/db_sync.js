@@ -2,9 +2,11 @@ const root = document.getElementById("root");
 let status = { running: false, message: "Ready", results: [], compare: null, completed: 0, total: 0, phase: "idle" };
 let schemas = [];
 let components = [];
+let selectedComponents = new Set();
 let tables = [];
 let selected = new Set();
 let tableSearch = "";
+let componentSearch = "";
 let failedSearch = "";
 let error = "";
 let info = "";
@@ -24,7 +26,6 @@ const form = {
   targetPassword: "",
   thick: true,
   schema: "",
-  component: "",
   addMissingColumns: true,
   createMissingTables: true,
   replaceData: false,
@@ -79,10 +80,61 @@ function readForm() {
   form.targetPassword = get("tgt-password");
   form.thick = checked("opt-thick");
   form.schema = get("schema").trim();
-  form.component = get("component").trim();
   form.addMissingColumns = checked("opt-add-cols");
   form.createMissingTables = checked("opt-create-tables");
   form.replaceData = checked("opt-replace");
+  syncComponentSelectionFromDom();
+}
+
+function componentName(entry) {
+  return typeof entry === "string" ? entry : entry.name;
+}
+
+function syncComponentSelectionFromDom() {
+  document.querySelectorAll("input[data-component]").forEach(box => {
+    const name = box.getAttribute("data-component");
+    if (!name) return;
+    if (box.checked) selectedComponents.add(name);
+    else selectedComponents.delete(name);
+  });
+}
+
+function filteredComponents() {
+  const query = componentSearch.trim().toLowerCase();
+  if (!query) return components;
+  return components.filter(entry => {
+    const name = componentName(entry);
+    return String(name).toLowerCase().includes(query);
+  });
+}
+
+function componentListBlock() {
+  if (!components.length) {
+    return `<p class="help">Load components to filter tables by IFS module. Uncheck components you want to skip, then Load tables.</p>`;
+  }
+  const visible = filteredComponents();
+  const list = visible.length
+    ? `<div class="packages" style="max-height:220px;overflow:auto">${visible.map(entry => {
+        const name = componentName(entry);
+        const count = typeof entry === "string" ? null : entry.tableCount;
+        const label = count == null ? name : `${name} (${count})`;
+        const id = `cmp-${name}`;
+        return `<label class="check-row"><input type="checkbox" id="${esc(id)}" data-component="${esc(name)}" ${selectedComponents.has(name) ? "checked" : ""}/> ${esc(label)}</label>`;
+      }).join("")}</div>`
+    : `<p class="help">No components match “${esc(componentSearch)}”.</p>`;
+  return `
+      <div class="buttons" style="margin:10px 0;gap:8px;display:flex;flex-wrap:wrap;align-items:center">
+        <input id="component-search" value="${esc(componentSearch)}" placeholder="Search components…" style="flex:1;min-width:220px;min-height:42px;padding:9px 11px;border:1px solid #b7c4d8;border-radius:8px;font:inherit"/>
+        <button type="button" class="secondary" id="component-search-btn">Search</button>
+        <button type="button" class="secondary" id="component-search-clear" ${componentSearch ? "" : "disabled"}>Clear</button>
+      </div>
+      <p class="help">${visible.length} of ${components.length} component(s) shown · ${selectedComponents.size} selected · unchecked components are skipped</p>
+      ${list}
+      <div class="buttons" style="margin-top:10px">
+        <button type="button" class="secondary" id="select-all-components" ${status.running ? "disabled" : ""}>Select all components</button>
+        <button type="button" class="secondary" id="select-visible-components" ${status.running || !visible.length ? "disabled" : ""}>Select visible components</button>
+        <button type="button" class="secondary" id="clear-components" ${status.running ? "disabled" : ""}>Clear components</button>
+      </div>`;
 }
 
 function nav() {
@@ -176,7 +228,9 @@ function filteredTables() {
 }
 
 function tableListBlock() {
-  if (!tables.length) return `<p class="help">Load schemas, choose a schema, then load tables.</p>`;
+  if (!tables.length) {
+    return `<p class="help">Choose schema, optionally select components above, then Load tables.</p>`;
+  }
   const visible = filteredTables();
   const list = visible.length
     ? `<div class="packages" style="max-height:280px;overflow:auto">${visible.map(t => {
@@ -193,9 +247,9 @@ function tableListBlock() {
       <p class="help">${visible.length} of ${tables.length} table(s) shown · ${selected.size} selected</p>
       ${list}
       <div class="buttons" style="margin-top:10px">
-        <button type="button" class="secondary" id="select-all" ${status.running ? "disabled" : ""}>Select all</button>
-        <button type="button" class="secondary" id="select-visible" ${status.running || !visible.length ? "disabled" : ""}>Select visible</button>
-        <button type="button" class="secondary" id="select-none" ${status.running ? "disabled" : ""}>Clear</button>
+        <button type="button" class="secondary" id="select-all" ${status.running ? "disabled" : ""}>Select all tables</button>
+        <button type="button" class="secondary" id="select-visible" ${status.running || !visible.length ? "disabled" : ""}>Select visible tables</button>
+        <button type="button" class="secondary" id="select-none" ${status.running ? "disabled" : ""}>Clear tables</button>
       </div>`;
 }
 
@@ -216,14 +270,6 @@ function statusBlock() {
 function render() {
   const schemaOptions = [`<option value="">Select schema…</option>`]
     .concat(schemas.map(s => `<option value="${esc(s)}" ${form.schema === s ? "selected" : ""}>${esc(s)}</option>`))
-    .join("");
-  const componentOptions = [`<option value="">All components</option>`]
-    .concat(components.map(c => {
-      const name = typeof c === "string" ? c : c.name;
-      const count = typeof c === "string" ? null : c.tableCount;
-      const label = count == null ? name : `${name} (${count})`;
-      return `<option value="${esc(name)}" ${form.component === name ? "selected" : ""}>${esc(label)}</option>`;
-    }))
     .join("");
   const thickDir = (status.thick && status.thick.libDir) || "";
   const dbhomeWarn = /dbhome/i.test(thickDir)
@@ -252,15 +298,16 @@ function render() {
       <h2>Tables</h2>
       <div class="buttons">
         <button type="button" class="secondary" id="load-schemas" ${status.running ? "disabled" : ""}>Load schemas from source</button>
-        <button type="button" class="secondary" id="load-components" ${status.running || !form.schema ? "disabled" : ""}>Load components</button>
       </div>
       <label>Schema <select id="schema">${schemaOptions}</select></label>
-      <label>Component <select id="component" ${!components.length ? "disabled" : ""}>${componentOptions}</select></label>
-      <p class="help">Components come from IFS dictionary metadata (MODULE). Pick a component to load only that module’s tables, or leave All components and load every table.</p>
       <div class="buttons">
+        <button type="button" class="secondary" id="load-components" ${status.running || !form.schema ? "disabled" : ""}>Load components</button>
         <button type="button" class="secondary" id="load-tables" ${status.running || !form.schema ? "disabled" : ""}>Load tables</button>
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
       </div>
+      <h3 style="margin:14px 0 6px;font-size:15px;color:#35435b">Components</h3>
+      ${componentListBlock()}
+      <h3 style="margin:18px 0 6px;font-size:15px;color:#35435b">Tables</h3>
       ${tableListBlock()}
       <label class="check-row"><input id="opt-create-tables" type="checkbox" ${form.createMissingTables ? "checked" : ""}/> Create missing tables on DEV</label>
       <label class="check-row"><input id="opt-add-cols" type="checkbox" ${form.addMissingColumns ? "checked" : ""}/> Add missing columns on DEV (nullable)</label>
@@ -350,6 +397,60 @@ function render() {
     };
   }
 
+  const componentSearchInput = document.getElementById("component-search");
+  const componentSearchBtn = document.getElementById("component-search-btn");
+  const componentSearchClear = document.getElementById("component-search-clear");
+  if (componentSearchBtn) {
+    componentSearchBtn.onclick = () => {
+      componentSearch = componentSearchInput?.value.trim() || "";
+      render();
+    };
+  }
+  if (componentSearchClear) {
+    componentSearchClear.onclick = () => {
+      componentSearch = "";
+      render();
+    };
+  }
+  if (componentSearchInput) {
+    componentSearchInput.onkeydown = event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        componentSearch = componentSearchInput.value.trim();
+        render();
+      }
+    };
+  }
+
+  const selAllCmp = document.getElementById("select-all-components");
+  const selVisibleCmp = document.getElementById("select-visible-components");
+  const clearCmp = document.getElementById("clear-components");
+  if (selAllCmp) {
+    selAllCmp.onclick = () => {
+      components.forEach(entry => selectedComponents.add(componentName(entry)));
+      render();
+    };
+  }
+  if (selVisibleCmp) {
+    selVisibleCmp.onclick = () => {
+      filteredComponents().forEach(entry => selectedComponents.add(componentName(entry)));
+      render();
+    };
+  }
+  if (clearCmp) {
+    clearCmp.onclick = () => {
+      selectedComponents.clear();
+      render();
+    };
+  }
+  document.querySelectorAll("input[data-component]").forEach(box => {
+    box.onchange = () => {
+      const name = box.getAttribute("data-component");
+      if (box.checked) selectedComponents.add(name);
+      else selectedComponents.delete(name);
+    };
+  });
+
   const selAll = document.getElementById("select-all");
   const selVisible = document.getElementById("select-visible");
   const selNone = document.getElementById("select-none");
@@ -366,22 +467,13 @@ function render() {
   document.getElementById("schema").onchange = () => {
     readForm();
     components = [];
-    form.component = "";
+    selectedComponents.clear();
+    componentSearch = "";
     tables = [];
     selected.clear();
     tableSearch = "";
     render();
   };
-  const componentSelect = document.getElementById("component");
-  if (componentSelect) {
-    componentSelect.onchange = () => {
-      readForm();
-      tables = [];
-      selected.clear();
-      tableSearch = "";
-      render();
-    };
-  }
   if (typeof mountSessionChrome === "function") mountSessionChrome("/db-sync");
 }
 
@@ -438,13 +530,15 @@ async function loadComponents() {
       body: JSON.stringify({ endpoint: endpoint("source"), schema: form.schema }),
     });
     components = result.components || [];
-    form.component = "";
+    selectedComponents = new Set(components.map(componentName));
+    componentSearch = "";
     tables = [];
     selected = new Set();
     tableSearch = "";
-    info = result.message || `Loaded ${components.length} component(s).`;
+    info = `${result.message || `Loaded ${components.length} component(s).`} All selected — uncheck ones to skip, then Load tables.`;
   } catch (e) {
     components = [];
+    selectedComponents.clear();
     error = e.message;
   }
   render();
@@ -459,9 +553,15 @@ async function loadTables() {
     render();
     return;
   }
+  const chosen = [...selectedComponents];
+  if (components.length && !chosen.length) {
+    error = "Select at least one component. Uncheck modules to skip; leave checked the ones you need.";
+    render();
+    return;
+  }
   try {
     const payload = { endpoint: endpoint("source"), schema: form.schema };
-    if (form.component) payload.component = form.component;
+    if (chosen.length) payload.components = chosen;
     const result = await api("/api/db-sync/tables", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -470,9 +570,9 @@ async function loadTables() {
     tables = result.tables || [];
     selected = new Set();
     tableSearch = "";
-    info = form.component
-      ? `Loaded ${tables.length} table(s) for component ${form.component}.`
-      : `Loaded ${tables.length} table(s).`;
+    info = chosen.length
+      ? `Loaded ${tables.length} table(s) from ${chosen.length} component(s).`
+      : `Loaded ${tables.length} table(s) (all schema tables — components not loaded).`;
   } catch (e) {
     error = e.message;
   }

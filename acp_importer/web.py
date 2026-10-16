@@ -195,6 +195,7 @@ class DbSyncSchemaBody(BaseModel):
     endpoint: OracleEndpointRequest
     owner_schema: str | None = Field(default=None, alias="schema")
     component: str | None = None
+    components: list[str] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -1460,14 +1461,24 @@ def api_db_sync_components(body: DbSyncSchemaBody) -> dict[str, Any]:
 def api_db_sync_tables(body: DbSyncSchemaBody) -> dict[str, Any]:
     if not body.owner_schema:
         raise HTTPException(status_code=400, detail="Schema is required")
+    selected_components = [
+        str(name).strip().upper()
+        for name in (body.components or [])
+        if str(name).strip()
+    ]
+    if not selected_components and body.component:
+        name = str(body.component).strip().upper()
+        if name:
+            selected_components = [name]
     try:
         return {
             "tables": db_list_tables(
                 _oracle_endpoint(body.endpoint),
                 body.owner_schema,
-                body.component,
+                components=selected_components or None,
             ),
-            "component": (body.component or "").strip().upper() or None,
+            "components": selected_components or None,
+            "component": selected_components[0] if len(selected_components) == 1 else None,
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

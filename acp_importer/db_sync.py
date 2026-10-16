@@ -518,11 +518,22 @@ def list_schemas(endpoint: OracleEndpoint) -> list[str]:
         return [str(r[0]) for r in cur.fetchall()]
 
 
-def list_tables(endpoint: OracleEndpoint, schema: str, component: str | None = None) -> list[str]:
+def list_tables(
+    endpoint: OracleEndpoint,
+    schema: str,
+    component: str | None = None,
+    components: list[str] | None = None,
+) -> list[str]:
     owner = _quote_ident(schema)
-    component_name = (component or "").strip()
-    if component_name:
-        return list_component_tables(endpoint, owner, component_name)
+    selected_components = [
+        str(name).strip()
+        for name in (components or [])
+        if str(name).strip()
+    ]
+    if not selected_components and (component or "").strip():
+        selected_components = [(component or "").strip()]
+    if selected_components:
+        return list_component_tables(endpoint, owner, selected_components)
     with _connect(endpoint) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -631,50 +642,66 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
         )
 
 
-def list_component_tables(endpoint: OracleEndpoint, schema: str, component: str) -> list[str]:
+def list_component_tables(
+    endpoint: OracleEndpoint,
+    schema: str,
+    component: str | list[str],
+) -> list[str]:
     owner = _quote_ident(schema)
-    module = (component or "").strip().upper()
-    if not module:
+    if isinstance(component, str):
+        modules = [(component or "").strip().upper()]
+    else:
+        modules = sorted({str(name).strip().upper() for name in component if str(name).strip()})
+    modules = [name for name in modules if name]
+    if not modules:
         return []
-    queries = [
-        f"""
-        select distinct upper(table_name)
-        from {owner}.dictionary_sys_tab
-        where upper(module) = :module
-          and table_name is not null
-        order by 1
-        """,
-        f"""
-        select distinct upper(table_name)
-        from {owner}.dictionary_sys_lu_tab
-        where upper(module) = :module
-          and table_name is not null
-        order by 1
-        """,
-    ]
+
+    # Oracle IN-list bind limit is generous for typical IFS module counts; batch anyway.
+    batch_size = 500
+    names: set[str] = set()
     with _connect(endpoint) as conn:
-        for sql in queries:
-            try:
-                rows = _run_component_query(conn, sql, {"module": module})
-            except Exception as exc:
-                LOG.info("Component table query failed: %s", exc)
-                continue
-            names = [str(row[0]) for row in rows if row and row[0]]
-            if not names:
-                continue
-            # Keep only tables that actually exist in the schema.
-            cur = conn.cursor()
-            cur.execute(
-                """
-                select table_name
-                from all_tables
-                where owner = :owner
+        for start in range(0, len(modules), batch_size):
+            batch = modules[start : start + batch_size]
+            binds = {f"m{i}": value for i, value in enumerate(batch)}
+            placeholders = ", ".join(f":m{i}" for i in range(len(batch)))
+            queries = [
+                f"""
+                select distinct upper(table_name)
+                from {owner}.dictionary_sys_tab
+                where upper(module) in ({placeholders})
+                  and table_name is not null
                 """,
-                {"owner": owner},
-            )
-            existing = {str(row[0]).upper() for row in cur.fetchall()}
-            return [name for name in names if name in existing]
-    return []
+                f"""
+                select distinct upper(table_name)
+                from {owner}.dictionary_sys_lu_tab
+                where upper(module) in ({placeholders})
+                  and table_name is not null
+                """,
+            ]
+            batch_names: list[str] = []
+            for sql in queries:
+                try:
+                    rows = _run_component_query(conn, sql, binds)
+                except Exception as exc:
+                    LOG.info("Component table query failed: %s", exc)
+                    continue
+                batch_names = [str(row[0]) for row in rows if row and row[0]]
+                if batch_names:
+                    break
+            names.update(batch_names)
+        if not names:
+            return []
+        cur = conn.cursor()
+        cur.execute(
+            """
+            select table_name
+            from all_tables
+            where owner = :owner
+            """,
+            {"owner": owner},
+        )
+        existing = {str(row[0]).upper() for row in cur.fetchall()}
+        return sorted(name for name in names if name in existing)
 
 
 def _columns(conn, schema: str, table: str) -> list[dict[str, Any]]:
