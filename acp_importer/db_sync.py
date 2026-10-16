@@ -148,13 +148,26 @@ def _state_path(owner: str | None) -> Path:
     return _STATE_DIR / f"{safe}.json"
 
 
-def _save_selection(owner: str | None, schema: str, tables: list[str]) -> None:
+def _save_state(owner: str | None, *, schema: str | None = None, tables: list[str] | None = None, failed: list[dict[str, Any]] | None = None) -> None:
     path = _state_path(owner)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"schema": schema, "tables": tables}, indent=2),
-        encoding="utf-8",
-    )
+    current: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current = {}
+    if schema is not None:
+        current["schema"] = schema
+    if tables is not None:
+        current["tables"] = tables
+    if failed is not None:
+        current["failedTables"] = failed
+    path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+
+def _save_selection(owner: str | None, schema: str, tables: list[str]) -> None:
+    _save_state(owner, schema=schema, tables=tables)
 
 
 def _load_selection(owner: str | None) -> list[str]:
@@ -166,6 +179,22 @@ def _load_selection(owner: str | None) -> list[str]:
     except (OSError, json.JSONDecodeError):
         return []
     return [str(name) for name in (data.get("tables") or [])]
+
+
+def _load_failed(owner: str | None) -> list[dict[str, Any]]:
+    path = _state_path(owner)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = data.get("failedTables") or []
+    return [
+        {"table": str(row.get("table") or "*"), "message": str(row.get("message") or "Failed")}
+        for row in rows
+        if isinstance(row, dict)
+    ]
 
 
 def _job(owner: str | None) -> SyncJob:
@@ -185,8 +214,16 @@ def get_status(owner: str | None) -> dict[str, Any]:
     status["selectedCount"] = len(status.pop("selected_tables", []) or []) or len(_load_selection(owner))
     status["resultsTotal"] = len(results)
     status["succeededCount"] = sum(1 for row in results if row.get("success") and not row.get("skipped"))
-    status["failedCount"] = sum(1 for row in results if not row.get("success"))
+    failed = [
+        {"table": row.get("table") or "*", "message": row.get("message") or "Failed"}
+        for row in results
+        if not row.get("success")
+    ]
+    if not failed and not job.running:
+        failed = _load_failed(owner)
+    status["failedCount"] = len(failed)
     status["skippedCount"] = sum(1 for row in results if row.get("skipped"))
+    status["failedTables"] = failed
     status["results"] = results[-30:]
     if compare and len(compare.get("tables") or []) > 80:
         issues = [t for t in compare["tables"] if t.get("status") not in {"ok", None}]
@@ -1109,3 +1146,12 @@ def _run_sync(
             job.cancel_requested = False
             job.phase = "idle"
             job.current_action = job.current_action if job.current_action == "finished" else "idle"
+            failed_rows = [
+                {"table": row.get("table") or "*", "message": row.get("message") or "Failed"}
+                for row in job.results
+                if not row.get("success")
+            ]
+        try:
+            _save_state(owner, failed=failed_rows)
+        except OSError:
+            LOG.exception("Could not persist failed table list")

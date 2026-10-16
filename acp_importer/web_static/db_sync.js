@@ -3,6 +3,8 @@ let status = { running: false, message: "Ready", results: [], compare: null, com
 let schemas = [];
 let tables = [];
 let selected = new Set();
+let tableSearch = "";
+let failedSearch = "";
 let error = "";
 let info = "";
 
@@ -137,6 +139,63 @@ function resultsBlock() {
   return `<section class="card"><h2>Recent tables</h2>${more}<ul class="results">${rows}</ul></section>`;
 }
 
+function failedTablesBlock() {
+  const failed = status.failedTables || [];
+  if (!failed.length) return "";
+  const query = failedSearch.trim().toLowerCase();
+  const filtered = query
+    ? failed.filter(row => String(row.table || "").toLowerCase().includes(query) || String(row.message || "").toLowerCase().includes(query))
+    : failed;
+  const rows = filtered.map(row => `<tr>
+      <td>${esc(row.table)}</td>
+      <td>${esc(row.message)}</td>
+    </tr>`).join("") || `<tr><td colspan="2">No failed tables match “${esc(failedSearch)}”.</td></tr>`;
+  return `<section class="card">
+    <h2>Failed tables (${failed.length})</h2>
+    <div class="buttons" style="margin-bottom:10px;gap:8px;display:flex;flex-wrap:wrap;align-items:center">
+      <input id="failed-search" value="${esc(failedSearch)}" placeholder="Search failed tables…" style="flex:1;min-width:220px;min-height:42px;padding:9px 11px;border:1px solid #b7c4d8;border-radius:8px;font:inherit"/>
+      <button type="button" class="secondary" id="failed-search-btn">Search</button>
+      <button type="button" class="secondary" id="failed-search-clear" ${failedSearch ? "" : "disabled"}>Clear</button>
+      <button type="button" class="secondary" id="select-failed" ${status.running ? "disabled" : ""}>Select failed in table list</button>
+    </div>
+    <p class="help">Showing ${filtered.length} of ${failed.length} failed table(s).</p>
+    <div class="items-table-wrap" style="max-height:320px;overflow:auto"><table class="items-table">
+      <thead><tr><th>Table</th><th>Error</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </section>`;
+}
+
+function filteredTables() {
+  const query = tableSearch.trim().toLowerCase();
+  if (!query) return tables;
+  return tables.filter(name => String(name).toLowerCase().includes(query));
+}
+
+function tableListBlock() {
+  if (!tables.length) return `<p class="help">Load schemas, choose a schema, then load tables.</p>`;
+  const visible = filteredTables();
+  const list = visible.length
+    ? `<div class="packages" style="max-height:280px;overflow:auto">${visible.map(t => {
+        const id = `tbl-${t}`;
+        return `<label class="check-row"><input type="checkbox" id="${esc(id)}" data-table="${esc(t)}" ${selected.has(t) ? "checked" : ""}/> ${esc(t)}</label>`;
+      }).join("")}</div>`
+    : `<p class="help">No tables match “${esc(tableSearch)}”.</p>`;
+  return `
+      <div class="buttons" style="margin:10px 0;gap:8px;display:flex;flex-wrap:wrap;align-items:center">
+        <input id="table-search" value="${esc(tableSearch)}" placeholder="Search tables…" style="flex:1;min-width:220px;min-height:42px;padding:9px 11px;border:1px solid #b7c4d8;border-radius:8px;font:inherit"/>
+        <button type="button" class="secondary" id="table-search-btn">Search</button>
+        <button type="button" class="secondary" id="table-search-clear" ${tableSearch ? "" : "disabled"}>Clear</button>
+      </div>
+      <p class="help">${visible.length} of ${tables.length} table(s) shown · ${selected.size} selected</p>
+      ${list}
+      <div class="buttons" style="margin-top:10px">
+        <button type="button" class="secondary" id="select-all" ${status.running ? "disabled" : ""}>Select all</button>
+        <button type="button" class="secondary" id="select-visible" ${status.running || !visible.length ? "disabled" : ""}>Select visible</button>
+        <button type="button" class="secondary" id="select-none" ${status.running ? "disabled" : ""}>Clear</button>
+      </div>`;
+}
+
 function statusBlock() {
   const table = status.current_table || "—";
   const action = status.current_action || status.phase || "idle";
@@ -155,16 +214,6 @@ function render() {
   const schemaOptions = [`<option value="">Select schema…</option>`]
     .concat(schemas.map(s => `<option value="${esc(s)}" ${form.schema === s ? "selected" : ""}>${esc(s)}</option>`))
     .join("");
-  const tableList = tables.length
-    ? `<div class="packages" style="max-height:280px;overflow:auto">${tables.map(t => {
-        const id = `tbl-${t}`;
-        return `<label class="check-row"><input type="checkbox" id="${esc(id)}" data-table="${esc(t)}" ${selected.has(t) ? "checked" : ""}/> ${esc(t)}</label>`;
-      }).join("")}</div>
-      <div class="buttons" style="margin-top:10px">
-        <button type="button" class="secondary" id="select-all" ${status.running ? "disabled" : ""}>Select all</button>
-        <button type="button" class="secondary" id="select-none" ${status.running ? "disabled" : ""}>Clear</button>
-      </div>`
-    : `<p class="help">Load schemas, choose a schema, then load tables.</p>`;
   const thickDir = (status.thick && status.thick.libDir) || "";
   const dbhomeWarn = /dbhome/i.test(thickDir)
     ? " Using a full Oracle dbhome as the client often causes ORA-12569 — install Instant Client and set ORACLE_CLIENT_LIB_DIR."
@@ -198,7 +247,7 @@ function render() {
         <button type="button" class="secondary" id="load-tables" ${status.running || !form.schema ? "disabled" : ""}>Load tables</button>
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
       </div>
-      ${tableList}
+      ${tableListBlock()}
       <label class="check-row"><input id="opt-create-tables" type="checkbox" ${form.createMissingTables ? "checked" : ""}/> Create missing tables on DEV</label>
       <label class="check-row"><input id="opt-add-cols" type="checkbox" ${form.addMissingColumns ? "checked" : ""}/> Add missing columns on DEV (nullable)</label>
       <label class="check-row"><input id="opt-replace" type="checkbox" ${form.replaceData ? "checked" : ""}/> Replace target rows (DELETE then INSERT) — full sync only</label>
@@ -210,6 +259,7 @@ function render() {
       <p class="help">Retry checks source and target row counts. Tables that already match are left unchanged and are not deleted. Only failed or short tables are copied again.</p>
     </section>
     ${statusBlock()}
+    ${failedTablesBlock()}
     ${compareBlock()}
     ${resultsBlock()}
   </div></div></div>`;
@@ -223,9 +273,73 @@ function render() {
   document.getElementById("start-sync").onclick = () => startSync(false);
   document.getElementById("retry-failed").onclick = () => startSync(true);
   document.getElementById("stop-sync").onclick = stopSync;
+
+  const tableSearchInput = document.getElementById("table-search");
+  const tableSearchBtn = document.getElementById("table-search-btn");
+  const tableSearchClear = document.getElementById("table-search-clear");
+  if (tableSearchBtn) {
+    tableSearchBtn.onclick = () => {
+      tableSearch = tableSearchInput?.value.trim() || "";
+      render();
+    };
+  }
+  if (tableSearchClear) {
+    tableSearchClear.onclick = () => {
+      tableSearch = "";
+      render();
+    };
+  }
+  if (tableSearchInput) {
+    tableSearchInput.onkeydown = event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        tableSearch = tableSearchInput.value.trim();
+        render();
+      }
+    };
+  }
+
+  const failedSearchInput = document.getElementById("failed-search");
+  const failedSearchBtn = document.getElementById("failed-search-btn");
+  const failedSearchClear = document.getElementById("failed-search-clear");
+  const selectFailed = document.getElementById("select-failed");
+  if (failedSearchBtn) {
+    failedSearchBtn.onclick = () => {
+      failedSearch = failedSearchInput?.value.trim() || "";
+      render();
+    };
+  }
+  if (failedSearchClear) {
+    failedSearchClear.onclick = () => {
+      failedSearch = "";
+      render();
+    };
+  }
+  if (failedSearchInput) {
+    failedSearchInput.onkeydown = event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        failedSearch = failedSearchInput.value.trim();
+        render();
+      }
+    };
+  }
+  if (selectFailed) {
+    selectFailed.onclick = () => {
+      (status.failedTables || []).forEach(row => {
+        const name = row.table;
+        if (name && name !== "*" && tables.includes(name)) selected.add(name);
+      });
+      info = `Selected ${selected.size} table(s), including failed ones found in the loaded list.`;
+      render();
+    };
+  }
+
   const selAll = document.getElementById("select-all");
+  const selVisible = document.getElementById("select-visible");
   const selNone = document.getElementById("select-none");
   if (selAll) selAll.onclick = () => { tables.forEach(t => selected.add(t)); render(); };
+  if (selVisible) selVisible.onclick = () => { filteredTables().forEach(t => selected.add(t)); render(); };
   if (selNone) selNone.onclick = () => { selected.clear(); render(); };
   document.querySelectorAll("input[data-table]").forEach(box => {
     box.onchange = () => {
@@ -238,6 +352,7 @@ function render() {
     readForm();
     tables = [];
     selected.clear();
+    tableSearch = "";
     render();
   };
   if (typeof mountSessionChrome === "function") mountSessionChrome("/db-sync");
@@ -297,6 +412,7 @@ async function loadTables() {
     });
     tables = result.tables || [];
     selected = new Set();
+    tableSearch = "";
     info = `Loaded ${tables.length} table(s).`;
   } catch (e) {
     error = e.message;
