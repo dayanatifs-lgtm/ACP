@@ -1,6 +1,7 @@
 const root = document.getElementById("root");
 let status = { running: false, message: "Ready", results: [], compare: null, completed: 0, total: 0, phase: "idle" };
 let schemas = [];
+let components = [];
 let tables = [];
 let selected = new Set();
 let tableSearch = "";
@@ -23,6 +24,7 @@ const form = {
   targetPassword: "",
   thick: true,
   schema: "",
+  component: "",
   addMissingColumns: true,
   createMissingTables: true,
   replaceData: false,
@@ -77,6 +79,7 @@ function readForm() {
   form.targetPassword = get("tgt-password");
   form.thick = checked("opt-thick");
   form.schema = get("schema").trim();
+  form.component = get("component").trim();
   form.addMissingColumns = checked("opt-add-cols");
   form.createMissingTables = checked("opt-create-tables");
   form.replaceData = checked("opt-replace");
@@ -214,6 +217,14 @@ function render() {
   const schemaOptions = [`<option value="">Select schema…</option>`]
     .concat(schemas.map(s => `<option value="${esc(s)}" ${form.schema === s ? "selected" : ""}>${esc(s)}</option>`))
     .join("");
+  const componentOptions = [`<option value="">All components</option>`]
+    .concat(components.map(c => {
+      const name = typeof c === "string" ? c : c.name;
+      const count = typeof c === "string" ? null : c.tableCount;
+      const label = count == null ? name : `${name} (${count})`;
+      return `<option value="${esc(name)}" ${form.component === name ? "selected" : ""}>${esc(label)}</option>`;
+    }))
+    .join("");
   const thickDir = (status.thick && status.thick.libDir) || "";
   const dbhomeWarn = /dbhome/i.test(thickDir)
     ? " Using a full Oracle dbhome as the client often causes ORA-12569 — install Instant Client and set ORACLE_CLIENT_LIB_DIR."
@@ -241,8 +252,11 @@ function render() {
       <h2>Tables</h2>
       <div class="buttons">
         <button type="button" class="secondary" id="load-schemas" ${status.running ? "disabled" : ""}>Load schemas from source</button>
+        <button type="button" class="secondary" id="load-components" ${status.running || !form.schema ? "disabled" : ""}>Load components</button>
       </div>
       <label>Schema <select id="schema">${schemaOptions}</select></label>
+      <label>Component <select id="component" ${!components.length ? "disabled" : ""}>${componentOptions}</select></label>
+      <p class="help">Components come from IFS dictionary metadata (MODULE). Pick a component to load only that module’s tables, or leave All components and load every table.</p>
       <div class="buttons">
         <button type="button" class="secondary" id="load-tables" ${status.running || !form.schema ? "disabled" : ""}>Load tables</button>
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
@@ -268,6 +282,7 @@ function render() {
     btn.onclick = () => testEndpoint(btn.getAttribute("data-test"));
   });
   document.getElementById("load-schemas").onclick = loadSchemas;
+  document.getElementById("load-components").onclick = loadComponents;
   document.getElementById("load-tables").onclick = loadTables;
   document.getElementById("compare").onclick = compareSelected;
   document.getElementById("start-sync").onclick = () => startSync(false);
@@ -350,11 +365,23 @@ function render() {
   });
   document.getElementById("schema").onchange = () => {
     readForm();
+    components = [];
+    form.component = "";
     tables = [];
     selected.clear();
     tableSearch = "";
     render();
   };
+  const componentSelect = document.getElementById("component");
+  if (componentSelect) {
+    componentSelect.onchange = () => {
+      readForm();
+      tables = [];
+      selected.clear();
+      tableSearch = "";
+      render();
+    };
+  }
   if (typeof mountSessionChrome === "function") mountSessionChrome("/db-sync");
 }
 
@@ -395,6 +422,34 @@ async function loadSchemas() {
   render();
 }
 
+async function loadComponents() {
+  error = "";
+  info = "";
+  readForm();
+  if (!form.schema) {
+    error = "Select a schema first";
+    render();
+    return;
+  }
+  try {
+    const result = await api("/api/db-sync/components", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: endpoint("source"), schema: form.schema }),
+    });
+    components = result.components || [];
+    form.component = "";
+    tables = [];
+    selected = new Set();
+    tableSearch = "";
+    info = result.message || `Loaded ${components.length} component(s).`;
+  } catch (e) {
+    components = [];
+    error = e.message;
+  }
+  render();
+}
+
 async function loadTables() {
   error = "";
   info = "";
@@ -405,15 +460,19 @@ async function loadTables() {
     return;
   }
   try {
+    const payload = { endpoint: endpoint("source"), schema: form.schema };
+    if (form.component) payload.component = form.component;
     const result = await api("/api/db-sync/tables", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: endpoint("source"), schema: form.schema }),
+      body: JSON.stringify(payload),
     });
     tables = result.tables || [];
     selected = new Set();
     tableSearch = "";
-    info = `Loaded ${tables.length} table(s).`;
+    info = form.component
+      ? `Loaded ${tables.length} table(s) for component ${form.component}.`
+      : `Loaded ${tables.length} table(s).`;
   } catch (e) {
     error = e.message;
   }

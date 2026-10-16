@@ -68,6 +68,7 @@ from .db_sync import (
     compare_tables,
     ensure_thick_mode,
     get_status as db_sync_status,
+    list_components as db_list_components,
     list_schemas as db_list_schemas,
     list_tables as db_list_tables,
     request_stop as db_sync_stop,
@@ -193,6 +194,7 @@ class DbSyncEndpointBody(BaseModel):
 class DbSyncSchemaBody(BaseModel):
     endpoint: OracleEndpointRequest
     owner_schema: str | None = Field(default=None, alias="schema")
+    component: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -1442,12 +1444,31 @@ def api_db_sync_schemas(body: DbSyncEndpointBody) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/db-sync/components")
+def api_db_sync_components(body: DbSyncSchemaBody) -> dict[str, Any]:
+    if not body.owner_schema:
+        raise HTTPException(status_code=400, detail="Schema is required")
+    try:
+        return db_list_components(_oracle_endpoint(body.endpoint), body.owner_schema)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/db-sync/tables")
 def api_db_sync_tables(body: DbSyncSchemaBody) -> dict[str, Any]:
     if not body.owner_schema:
         raise HTTPException(status_code=400, detail="Schema is required")
     try:
-        return {"tables": db_list_tables(_oracle_endpoint(body.endpoint), body.owner_schema)}
+        return {
+            "tables": db_list_tables(
+                _oracle_endpoint(body.endpoint),
+                body.owner_schema,
+                body.component,
+            ),
+            "component": (body.component or "").strip().upper() or None,
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

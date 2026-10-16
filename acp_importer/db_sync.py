@@ -518,8 +518,11 @@ def list_schemas(endpoint: OracleEndpoint) -> list[str]:
         return [str(r[0]) for r in cur.fetchall()]
 
 
-def list_tables(endpoint: OracleEndpoint, schema: str) -> list[str]:
+def list_tables(endpoint: OracleEndpoint, schema: str, component: str | None = None) -> list[str]:
     owner = _quote_ident(schema)
+    component_name = (component or "").strip()
+    if component_name:
+        return list_component_tables(endpoint, owner, component_name)
     with _connect(endpoint) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -532,6 +535,146 @@ def list_tables(endpoint: OracleEndpoint, schema: str) -> list[str]:
             {"owner": owner},
         )
         return [str(r[0]) for r in cur.fetchall()]
+
+
+def _object_exists(conn, schema: str, name: str) -> bool:
+    owner = _quote_ident(schema)
+    object_name = _quote_ident(name)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        select 1
+        from all_objects
+        where owner = :owner
+          and object_name = :object_name
+          and object_type in ('TABLE', 'VIEW', 'SYNONYM')
+          and rownum = 1
+        """,
+        {"owner": owner, "object_name": object_name},
+    )
+    return cur.fetchone() is not None
+
+
+def _run_component_query(conn, sql: str, binds: dict[str, Any] | None = None) -> list[tuple]:
+    cur = conn.cursor()
+    cur.execute(sql, binds or {})
+    return list(cur.fetchall())
+
+
+def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
+    """Load IFS modules/components and table counts from dictionary metadata."""
+    owner = _quote_ident(schema)
+    queries = [
+        (
+            "dictionary_sys_tab",
+            f"""
+            select upper(module) as component, count(distinct upper(table_name)) as table_count
+            from {owner}.dictionary_sys_tab
+            where table_name is not null
+              and module is not null
+            group by upper(module)
+            order by 1
+            """,
+        ),
+        (
+            "dictionary_sys_lu_tab",
+            f"""
+            select upper(module) as component, count(distinct upper(table_name)) as table_count
+            from {owner}.dictionary_sys_lu_tab
+            where table_name is not null
+              and module is not null
+            group by upper(module)
+            order by 1
+            """,
+        ),
+        (
+            "module_tab",
+            f"""
+            select upper(m.module) as component,
+                   (
+                     select count(distinct upper(d.table_name))
+                     from {owner}.dictionary_sys_tab d
+                     where upper(d.module) = upper(m.module)
+                       and d.table_name is not null
+                   ) as table_count
+            from {owner}.module_tab m
+            where m.module is not null
+            order by 1
+            """,
+        ),
+    ]
+    with _connect(endpoint) as conn:
+        last_error: Exception | None = None
+        for source, sql in queries:
+            try:
+                rows = _run_component_query(conn, sql)
+            except Exception as exc:
+                last_error = exc
+                LOG.info("Component query via %s failed: %s", source, exc)
+                continue
+            components = [
+                {"name": str(row[0]), "tableCount": int(row[1] or 0)}
+                for row in rows
+                if row and row[0]
+            ]
+            if components:
+                return {
+                    "schema": owner,
+                    "source": source,
+                    "components": components,
+                    "message": f"Loaded {len(components)} component(s) from {source}.",
+                }
+        detail = f" Last error: {last_error}" if last_error else ""
+        raise ValueError(
+            "Could not load IFS components from dictionary metadata "
+            f"(tried dictionary_sys_tab / dictionary_sys_lu_tab / module_tab).{detail}"
+        )
+
+
+def list_component_tables(endpoint: OracleEndpoint, schema: str, component: str) -> list[str]:
+    owner = _quote_ident(schema)
+    module = (component or "").strip().upper()
+    if not module:
+        return []
+    queries = [
+        f"""
+        select distinct upper(table_name)
+        from {owner}.dictionary_sys_tab
+        where upper(module) = :module
+          and table_name is not null
+        order by 1
+        """,
+        f"""
+        select distinct upper(table_name)
+        from {owner}.dictionary_sys_lu_tab
+        where upper(module) = :module
+          and table_name is not null
+        order by 1
+        """,
+    ]
+    with _connect(endpoint) as conn:
+        for sql in queries:
+            try:
+                rows = _run_component_query(conn, sql, {"module": module})
+            except Exception as exc:
+                LOG.info("Component table query failed: %s", exc)
+                continue
+            names = [str(row[0]) for row in rows if row and row[0]]
+            if not names:
+                continue
+            # Keep only tables that actually exist in the schema.
+            cur = conn.cursor()
+            cur.execute(
+                """
+                select table_name
+                from all_tables
+                where owner = :owner
+                """,
+                {"owner": owner},
+            )
+            existing = {str(row[0]).upper() for row in cur.fetchall()}
+            return [name for name in names if name in existing]
+    return []
 
 
 def _columns(conn, schema: str, table: str) -> list[dict[str, Any]]:
