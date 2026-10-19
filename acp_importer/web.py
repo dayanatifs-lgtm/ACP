@@ -68,6 +68,7 @@ from .db_sync import (
     compare_tables,
     ensure_thick_mode,
     get_status as db_sync_status,
+    list_component_tables as db_list_component_tables,
     list_components as db_list_components,
     list_schemas as db_list_schemas,
     list_tables as db_list_tables,
@@ -1471,14 +1472,22 @@ def api_db_sync_tables(body: DbSyncSchemaBody) -> dict[str, Any]:
         if name:
             selected_components = [name]
     try:
+        endpoint = _oracle_endpoint(body.endpoint)
+        if selected_components:
+            result = db_list_component_tables(endpoint, body.owner_schema, selected_components)
+            return {
+                **result,
+                "component": selected_components[0] if len(selected_components) == 1 else None,
+            }
+        tables = db_list_tables(endpoint, body.owner_schema)
         return {
-            "tables": db_list_tables(
-                _oracle_endpoint(body.endpoint),
-                body.owner_schema,
-                components=selected_components or None,
-            ),
-            "components": selected_components or None,
-            "component": selected_components[0] if len(selected_components) == 1 else None,
+            "tables": tables,
+            "components": None,
+            "component": None,
+            "dictionaryNames": None,
+            "matchedTables": len(tables),
+            "schemaTableCount": len(tables),
+            "message": f"Loaded {len(tables)} table(s) (no component filter).",
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -533,7 +533,7 @@ def list_tables(
     if not selected_components and (component or "").strip():
         selected_components = [(component or "").strip()]
     if selected_components:
-        return list_component_tables(endpoint, owner, selected_components)
+        return list(list_component_tables(endpoint, owner, selected_components).get("tables") or [])
     with _connect(endpoint) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -642,11 +642,42 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
         )
 
 
+def _camel_to_snake(name: str) -> str:
+    """Convert IFS CamelCase LU names to Oracle snake case (CustomerOrder -> CUSTOMER_ORDER)."""
+    text = (name or "").strip()
+    if not text:
+        return ""
+    text = text.replace("-", "_").replace(" ", "_")
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", text)
+    return re.sub(r"_+", "_", text).upper().strip("_")
+
+
+def _component_name_variants(name: str) -> set[str]:
+    """Map IFS dictionary / LU names to likely physical Oracle table names."""
+    raw = (name or "").strip()
+    if not raw:
+        return set()
+    bases = {
+        raw.upper().replace("-", "_").replace(" ", "_"),
+        _camel_to_snake(raw),
+    }
+    suffixes = ("_TAB", "_VRT", "_ALL", "_CFP", "_CLP", "_TMP")
+    variants: set[str] = set()
+    for base in bases:
+        if not base:
+            continue
+        variants.add(base)
+        if not any(base.endswith(suffix) for suffix in suffixes):
+            variants.add(f"{base}_TAB")
+    return variants
+
+
 def list_component_tables(
     endpoint: OracleEndpoint,
     schema: str,
     component: str | list[str],
-) -> list[str]:
+) -> dict[str, Any]:
     owner = _quote_ident(schema)
     if isinstance(component, str):
         modules = [(component or "").strip().upper()]
@@ -654,43 +685,57 @@ def list_component_tables(
         modules = sorted({str(name).strip().upper() for name in component if str(name).strip()})
     modules = [name for name in modules if name]
     if not modules:
-        return []
+        return {
+            "tables": [],
+            "dictionaryNames": 0,
+            "matchedTables": 0,
+            "schemaTableCount": 0,
+            "components": [],
+            "message": "No components selected.",
+        }
 
-    # Oracle IN-list bind limit is generous for typical IFS module counts; batch anyway.
     batch_size = 500
-    names: set[str] = set()
+    dictionary_names: set[str] = set()
     with _connect(endpoint) as conn:
         for start in range(0, len(modules), batch_size):
             batch = modules[start : start + batch_size]
             binds = {f"m{i}": value for i, value in enumerate(batch)}
             placeholders = ", ".join(f":m{i}" for i in range(len(batch)))
-            queries = [
+            # Keep original casing — upper() in SQL destroys CamelCase needed for LU→table mapping.
+            dict_queries = [
                 f"""
-                select distinct upper(table_name)
+                select table_name, null as lu_name
                 from {owner}.dictionary_sys_tab
                 where upper(module) in ({placeholders})
                   and table_name is not null
                 """,
                 f"""
-                select distinct upper(table_name)
+                select table_name, lu_name
+                from {owner}.dictionary_sys_lu_tab
+                where upper(module) in ({placeholders})
+                  and (table_name is not null or lu_name is not null)
+                """,
+                f"""
+                select table_name, null as lu_name
                 from {owner}.dictionary_sys_lu_tab
                 where upper(module) in ({placeholders})
                   and table_name is not null
                 """,
             ]
-            batch_names: list[str] = []
-            for sql in queries:
+            for sql in dict_queries:
                 try:
                     rows = _run_component_query(conn, sql, binds)
                 except Exception as exc:
                     LOG.info("Component table query failed: %s", exc)
                     continue
-                batch_names = [str(row[0]) for row in rows if row and row[0]]
-                if batch_names:
-                    break
-            names.update(batch_names)
-        if not names:
-            return []
+                for row in rows:
+                    if not row:
+                        continue
+                    if row[0]:
+                        dictionary_names.add(str(row[0]).strip())
+                    if len(row) > 1 and row[1]:
+                        dictionary_names.add(str(row[1]).strip())
+
         cur = conn.cursor()
         cur.execute(
             """
@@ -701,7 +746,49 @@ def list_component_tables(
             {"owner": owner},
         )
         existing = {str(row[0]).upper() for row in cur.fetchall()}
-        return sorted(name for name in names if name in existing)
+        schema_table_count = len(existing)
+
+        if not dictionary_names:
+            return {
+                "tables": [],
+                "dictionaryNames": 0,
+                "matchedTables": 0,
+                "schemaTableCount": schema_table_count,
+                "components": modules,
+                "message": (
+                    "No dictionary table names found for the selected components on this source schema."
+                ),
+            }
+
+        expanded: set[str] = set()
+        for name in dictionary_names:
+            expanded.update(_component_name_variants(name))
+        matched = sorted(name for name in expanded if name in existing)
+
+        message = (
+            f"Matched {len(matched)} physical table(s) in {owner} "
+            f"(schema has {schema_table_count} table(s) total) "
+            f"from {len(dictionary_names)} dictionary name(s) "
+            f"across {len(modules)} component(s)."
+        )
+        if schema_table_count <= 50 and len(modules) > 5:
+            message += (
+                " Source schema looks nearly empty — components/tables always load from Source, "
+                "not Target. Keep CFG as Source and point only Target at the new environment."
+            )
+        elif len(matched) <= 20 and len(dictionary_names) > 50:
+            message += (
+                " Few dictionary names matched physical tables. "
+                "Confirm Source is CFG and schema IFSAPP."
+            )
+        return {
+            "tables": matched,
+            "dictionaryNames": len(dictionary_names),
+            "matchedTables": len(matched),
+            "schemaTableCount": schema_table_count,
+            "components": modules,
+            "message": message,
+        }
 
 
 def _columns(conn, schema: str, table: str) -> list[dict[str, Any]]:

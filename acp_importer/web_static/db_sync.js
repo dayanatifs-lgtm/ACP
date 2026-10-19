@@ -570,9 +570,25 @@ async function loadTables() {
     tables = result.tables || [];
     selected = new Set();
     tableSearch = "";
-    info = chosen.length
-      ? `Loaded ${tables.length} table(s) from ${chosen.length} component(s).`
-      : `Loaded ${tables.length} table(s) (all schema tables — components not loaded).`;
+    if (result.message) {
+      info = result.message;
+    } else if (chosen.length) {
+      info = `Loaded ${tables.length} table(s) from ${chosen.length} component(s).`;
+    } else {
+      info = `Loaded ${tables.length} table(s) (all schema tables — components not loaded).`;
+    }
+    if (chosen.length && (result.schemaTableCount || 0) <= 50 && chosen.length > 5) {
+      error = (
+        `Source schema only has ${result.schemaTableCount} physical table(s). ` +
+        `Components/tables always load from Source, not Target — keep CFG as Source ` +
+        `and set only Target to the new environment.`
+      );
+    } else if (chosen.length && tables.length <= 20 && (result.dictionaryNames || 0) > tables.length) {
+      error = (
+        `Only ${tables.length} physical table(s) matched on Source ` +
+        `(dictionary had ${result.dictionaryNames}). Confirm Source is CFG / schema IFSAPP.`
+      );
+    }
   } catch (e) {
     error = e.message;
   }
