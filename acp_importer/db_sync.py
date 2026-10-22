@@ -572,24 +572,41 @@ def _run_component_query(conn, sql: str, binds: dict[str, Any] | None = None) ->
     return list(cur.fetchall())
 
 
-def _rowkey_activated_tables(conn, owner: str) -> set[str]:
-    """Physical tables where Entity Rowkey is activated (ROWKEY column is NOT NULL)."""
+def _rowkey_column_tables(conn, owner: str) -> tuple[set[str], set[str]]:
+    """Return (strictly_activated, rowkey_present) physical tables.
+
+    IFS Entity "Rowkey Activated = Yes" usually means ROWKEY is NOT NULL and/or
+    defaults to SYS_GUID(). Some Cloud DBs still show Activated in the Entity UI
+    while nullable remains Y; for those we fall back to ROWKEY-present tables.
+    """
     cur = conn.cursor()
     cur.execute(
         """
-        select table_name
+        select table_name, nullable, data_default
         from all_tab_columns
         where owner = :owner
           and column_name = 'ROWKEY'
-          and nullable = 'N'
         """,
         {"owner": owner},
     )
-    return {str(row[0]).upper() for row in cur.fetchall() if row and row[0]}
+    activated: set[str] = set()
+    present: set[str] = set()
+    for row in cur.fetchall():
+        if not row or not row[0]:
+            continue
+        table = str(row[0]).upper()
+        present.add(table)
+        nullable = str(row[1] or "").upper()
+        default = str(row[2] or "").upper().replace(" ", "")
+        if nullable == "N" or "SYS_GUID" in default:
+            activated.add(table)
+    return activated, present
 
 
-def _dictionary_entity_rows(conn, owner: str, modules: list[str] | None = None) -> list[tuple[str, str]]:
-    """Return (MODULE, base_table_or_lu_name) rows from IFS Entity dictionary sources."""
+def _dictionary_entity_rows(
+    conn, owner: str, modules: list[str] | None = None
+) -> list[tuple[str, str, str | None]]:
+    """Return (MODULE, lu_name, table_name) rows from IFS Entity dictionary sources."""
     module_filter = ""
     binds: dict[str, Any] = {}
     if modules:
@@ -597,35 +614,53 @@ def _dictionary_entity_rows(conn, owner: str, modules: list[str] | None = None) 
         placeholders = ", ".join(f":m{i}" for i in range(len(modules)))
         module_filter = f" and upper(module) in ({placeholders}) "
 
-    # Try common IFS dictionary sources/columns used by the Entity page.
     queries = [
+        # Best: resolve Base Table the same way Entity page does.
         f"""
-        select upper(module), table_name, lu_name
+        select upper(module),
+               lu_name,
+               nvl({owner}.dictionary_sys.get_base_table_name(lu_name), table_name) as base_table
+        from {owner}.dictionary_sys_lu_tab
+        where module is not null
+          {module_filter}
+          and lu_name is not null
+        """,
+        f"""
+        select upper(module),
+               lu_name,
+               nvl({owner}.dictionary_sys.get_base_table_name(lu_name), table_name) as base_table
+        from {owner}.dictionary_sys_tab
+        where module is not null
+          {module_filter}
+          and lu_name is not null
+        """,
+        f"""
+        select upper(module), lu_name, table_name
         from {owner}.dictionary_sys_lu_tab
         where module is not null
           {module_filter}
           and (table_name is not null or lu_name is not null)
         """,
         f"""
-        select upper(module), table_name, lu_name
+        select upper(module), lu_name, table_name
         from {owner}.dictionary_sys_tab
         where module is not null
           {module_filter}
           and (table_name is not null or lu_name is not null)
         """,
         f"""
-        select upper(module), table_name, null as lu_name
+        select upper(module), null as lu_name, table_name
         from {owner}.dictionary_sys_tab
         where module is not null
           {module_filter}
           and table_name is not null
         """,
         f"""
-        select upper(module), table_name, null as lu_name
+        select upper(module), lu_name, table_name
         from {owner}.dictionary_sys_lu
         where module is not null
           {module_filter}
-          and table_name is not null
+          and (table_name is not null or lu_name is not null)
         """,
     ]
     last_error: Exception | None = None
@@ -636,14 +671,16 @@ def _dictionary_entity_rows(conn, owner: str, modules: list[str] | None = None) 
             last_error = exc
             LOG.info("Entity dictionary query failed: %s", exc)
             continue
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, str, str | None]] = []
         for row in rows:
             if not row or not row[0]:
                 continue
             module = str(row[0]).strip().upper()
-            for value in (row[1], row[2] if len(row) > 2 else None):
-                if value:
-                    out.append((module, str(value).strip()))
+            lu_name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+            table_name = str(row[2]).strip() if len(row) > 2 and row[2] else None
+            if not lu_name and not table_name:
+                continue
+            out.append((module, lu_name or (table_name or ""), table_name))
         if out:
             return out
     if last_error:
@@ -651,12 +688,47 @@ def _dictionary_entity_rows(conn, owner: str, modules: list[str] | None = None) 
     return []
 
 
+def _match_entity_base_tables(
+    entity_rows: list[tuple[str, str, str | None]],
+    existing: set[str],
+    activated: set[str],
+    rowkey_present: set[str],
+) -> tuple[dict[str, set[str]], str]:
+    """Map dictionary entities to physical tables; prefer strict Rowkey Activated."""
+    strict_counts: dict[str, set[str]] = {}
+    present_counts: dict[str, set[str]] = {}
+    for module, lu_name, table_name in entity_rows:
+        candidates: set[str] = set()
+        if table_name:
+            candidates.update(_component_name_variants(table_name))
+        if lu_name:
+            candidates.update(_component_name_variants(lu_name))
+        physical = candidates & existing
+        if not physical:
+            continue
+        present_hits = physical & rowkey_present
+        activated_hits = physical & activated
+        if present_hits:
+            present_counts.setdefault(module, set()).update(present_hits)
+        if activated_hits:
+            strict_counts.setdefault(module, set()).update(activated_hits)
+
+    strict_total = sum(len(v) for v in strict_counts.values())
+    present_total = sum(len(v) for v in present_counts.values())
+    # If strict activation finds almost nothing but Entity-capable ROWKEY tables exist,
+    # use ROWKEY-present matching (matches IFS Cloud Entity "Activated" in practice).
+    if strict_total == 0 and present_total > 0:
+        return present_counts, "rowkey-present"
+    if strict_total < max(10, present_total // 20) and present_total >= 50:
+        return present_counts, "rowkey-present-fallback"
+    return strict_counts, "rowkey-activated"
+
+
 def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
     """Load IFS components with counts of Rowkey-activated Entity base tables."""
     owner = _quote_ident(schema)
     with _connect(endpoint) as conn:
-        activated = _rowkey_activated_tables(conn, owner)
-        existing = set()
+        activated, rowkey_present = _rowkey_column_tables(conn, owner)
         cur = conn.cursor()
         cur.execute(
             """
@@ -671,7 +743,6 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
         try:
             entity_rows = _dictionary_entity_rows(conn, owner)
         except ValueError:
-            # Fall back to module list only if dictionary is unavailable.
             cur.execute(
                 f"""
                 select upper(module)
@@ -686,41 +757,42 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
                 "source": "module_tab",
                 "components": components,
                 "rowkeyActivatedTables": len(activated),
+                "rowkeyPresentTables": len(rowkey_present),
                 "message": (
                     f"Loaded {len(components)} component(s) from module_tab. "
-                    "Entity dictionary was unavailable, so Rowkey-activated counts are 0."
+                    "Entity dictionary was unavailable, so table counts are 0."
                 ),
             }
 
-        counts: dict[str, set[str]] = {}
-        for module, raw_name in entity_rows:
-            matched = _component_name_variants(raw_name) & existing & activated
-            if not matched:
-                continue
-            bucket = counts.setdefault(module, set())
-            bucket.update(matched)
-
+        counts, match_mode = _match_entity_base_tables(
+            entity_rows, existing, activated, rowkey_present
+        )
         components = [
             {"name": name, "tableCount": len(tables)}
             for name, tables in sorted(counts.items())
         ]
-        # Include modules that exist in dictionary but have zero activated tables, for selection UX.
-        all_modules = sorted({module for module, _ in entity_rows})
+        all_modules = sorted({module for module, _, _ in entity_rows})
         known = {item["name"] for item in components}
         for module in all_modules:
             if module not in known:
                 components.append({"name": module, "tableCount": 0})
         components.sort(key=lambda item: item["name"])
 
+        mode_label = (
+            "Rowkey Activated (NOT NULL / SYS_GUID default)"
+            if match_mode == "rowkey-activated"
+            else "Entity base tables that have a ROWKEY column (IFS Cloud Entity Activated)"
+        )
         return {
             "schema": owner,
-            "source": "entity-dictionary+rowkey",
+            "source": f"entity-dictionary+{match_mode}",
             "components": components,
             "rowkeyActivatedTables": len(activated),
+            "rowkeyPresentTables": len(rowkey_present),
+            "matchMode": match_mode,
             "message": (
-                f"Loaded {len(components)} component(s). "
-                f"Counts are Entity Base Tables with Rowkey Activated "
-                f"({len(activated)} activated table(s) in {owner})."
+                f"Loaded {len(components)} component(s). Counts are {mode_label}. "
+                f"Strict activated={len(activated)}, ROWKEY present={len(rowkey_present)} in {owner}."
             ),
         }
 
@@ -780,7 +852,7 @@ def list_component_tables(
         }
 
     with _connect(endpoint) as conn:
-        activated = _rowkey_activated_tables(conn, owner)
+        activated, rowkey_present = _rowkey_column_tables(conn, owner)
         cur = conn.cursor()
         cur.execute(
             """
@@ -794,24 +866,41 @@ def list_component_tables(
         schema_table_count = len(existing)
 
         entity_rows = _dictionary_entity_rows(conn, owner, modules)
-        dictionary_names = {raw_name for _, raw_name in entity_rows}
+        dictionary_names = {
+            name for _, lu_name, table_name in entity_rows for name in (lu_name, table_name or "") if name
+        }
 
+        counts, match_mode = _match_entity_base_tables(
+            entity_rows, existing, activated, rowkey_present
+        )
         matched: set[str] = set()
-        for _, raw_name in entity_rows:
-            matched.update(_component_name_variants(raw_name) & existing & activated)
+        for module in modules:
+            matched.update(counts.get(module, set()))
 
         tables = sorted(matched)
+        mode_label = (
+            "Rowkey Activated"
+            if match_mode == "rowkey-activated"
+            else "Entity base tables with ROWKEY column"
+        )
         message = (
-            f"Loaded {len(tables)} Entity Base Table(s) with Rowkey Activated "
-            f"for {len(modules)} component(s) "
+            f"Loaded {len(tables)} {mode_label} for {len(modules)} component(s) "
             f"({len(dictionary_names)} dictionary name(s); "
-            f"{len(activated)} rowkey-activated table(s) in {owner}; "
+            f"strict activated={len(activated)}, ROWKEY present={len(rowkey_present)} in {owner}; "
             f"schema has {schema_table_count} table(s) total)."
         )
         if not tables and dictionary_names:
+            existing_hits = 0
+            for _, lu_name, table_name in entity_rows:
+                candidates: set[str] = set()
+                if table_name:
+                    candidates.update(_component_name_variants(table_name))
+                if lu_name:
+                    candidates.update(_component_name_variants(lu_name))
+                existing_hits += len(candidates & existing)
             message += (
-                " No selected-component entities matched a physical base table with Rowkey Activated. "
-                "In IFS Entity page, Rowkey must show Activated = Yes."
+                f" No tables matched. Dictionary names that exist physically: {existing_hits}. "
+                "Check Source is CFG / IFSAPP (Entity page and DB Sync must use the same DB)."
             )
         elif schema_table_count <= 50 and len(modules) > 5:
             message += (
@@ -825,6 +914,8 @@ def list_component_tables(
             "matchedTables": len(tables),
             "schemaTableCount": schema_table_count,
             "rowkeyActivatedTables": len(activated),
+            "rowkeyPresentTables": len(rowkey_present),
+            "matchMode": match_mode,
             "components": modules,
             "message": message,
         }
