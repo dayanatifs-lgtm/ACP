@@ -110,7 +110,7 @@ function filteredComponents() {
 
 function componentListBlock() {
   if (!components.length) {
-    return `<p class="help">Load components to filter tables by IFS module. Uncheck components you want to skip, then Load tables.</p>`;
+    return `<p class="help">Load components from IFS Entity dictionary, select the ones you need, then Load tables (Entity Base Tables with Rowkey Activated).</p>`;
   }
   const visible = filteredComponents();
   const list = visible.length
@@ -128,7 +128,7 @@ function componentListBlock() {
         <button type="button" class="secondary" id="component-search-btn">Search</button>
         <button type="button" class="secondary" id="component-search-clear" ${componentSearch ? "" : "disabled"}>Clear</button>
       </div>
-      <p class="help">${visible.length} of ${components.length} component(s) shown · ${selectedComponents.size} selected · unchecked components are skipped</p>
+      <p class="help">${visible.length} of ${components.length} component(s) shown · ${selectedComponents.size} selected · counts = Rowkey-activated Entity base tables · unchecked components are skipped</p>
       ${list}
       <div class="buttons" style="margin-top:10px">
         <button type="button" class="secondary" id="select-all-components" ${status.running ? "disabled" : ""}>Select all components</button>
@@ -305,9 +305,11 @@ function render() {
         <button type="button" class="secondary" id="load-tables" ${status.running || !form.schema ? "disabled" : ""}>Load tables</button>
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
       </div>
-      <h3 style="margin:14px 0 6px;font-size:15px;color:#35435b">Components</h3>
+      <h3 style="margin:14px 0 6px;font-size:15px;color:#35435b">1. Components</h3>
+      <p class="help">Same Component list as IFS Entity (Solution Manager → Entities). Select components, then load tables.</p>
       ${componentListBlock()}
-      <h3 style="margin:18px 0 6px;font-size:15px;color:#35435b">Tables</h3>
+      <h3 style="margin:18px 0 6px;font-size:15px;color:#35435b">2. Tables (Entity Base Table, Rowkey Activated)</h3>
+      <p class="help">Only base tables like <code>APP_CONFIG_IMPORT_TAB</code> where Entity Rowkey is Activated. Then select tables and Start sync.</p>
       ${tableListBlock()}
       <label class="check-row"><input id="opt-create-tables" type="checkbox" ${form.createMissingTables ? "checked" : ""}/> Create missing tables on DEV</label>
       <label class="check-row"><input id="opt-add-cols" type="checkbox" ${form.addMissingColumns ? "checked" : ""}/> Add missing columns on DEV (nullable)</label>

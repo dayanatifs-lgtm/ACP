@@ -572,74 +572,157 @@ def _run_component_query(conn, sql: str, binds: dict[str, Any] | None = None) ->
     return list(cur.fetchall())
 
 
-def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
-    """Load IFS modules/components and table counts from dictionary metadata."""
-    owner = _quote_ident(schema)
+def _rowkey_activated_tables(conn, owner: str) -> set[str]:
+    """Physical tables where Entity Rowkey is activated (ROWKEY column is NOT NULL)."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        select table_name
+        from all_tab_columns
+        where owner = :owner
+          and column_name = 'ROWKEY'
+          and nullable = 'N'
+        """,
+        {"owner": owner},
+    )
+    return {str(row[0]).upper() for row in cur.fetchall() if row and row[0]}
+
+
+def _dictionary_entity_rows(conn, owner: str, modules: list[str] | None = None) -> list[tuple[str, str]]:
+    """Return (MODULE, base_table_or_lu_name) rows from IFS Entity dictionary sources."""
+    module_filter = ""
+    binds: dict[str, Any] = {}
+    if modules:
+        binds = {f"m{i}": value for i, value in enumerate(modules)}
+        placeholders = ", ".join(f":m{i}" for i in range(len(modules)))
+        module_filter = f" and upper(module) in ({placeholders}) "
+
+    # Try common IFS dictionary sources/columns used by the Entity page.
     queries = [
-        (
-            "dictionary_sys_tab",
-            f"""
-            select upper(module) as component, count(distinct upper(table_name)) as table_count
-            from {owner}.dictionary_sys_tab
-            where table_name is not null
-              and module is not null
-            group by upper(module)
-            order by 1
-            """,
-        ),
-        (
-            "dictionary_sys_lu_tab",
-            f"""
-            select upper(module) as component, count(distinct upper(table_name)) as table_count
-            from {owner}.dictionary_sys_lu_tab
-            where table_name is not null
-              and module is not null
-            group by upper(module)
-            order by 1
-            """,
-        ),
-        (
-            "module_tab",
-            f"""
-            select upper(m.module) as component,
-                   (
-                     select count(distinct upper(d.table_name))
-                     from {owner}.dictionary_sys_tab d
-                     where upper(d.module) = upper(m.module)
-                       and d.table_name is not null
-                   ) as table_count
-            from {owner}.module_tab m
-            where m.module is not null
-            order by 1
-            """,
-        ),
+        f"""
+        select upper(module), table_name, lu_name
+        from {owner}.dictionary_sys_lu_tab
+        where module is not null
+          {module_filter}
+          and (table_name is not null or lu_name is not null)
+        """,
+        f"""
+        select upper(module), table_name, lu_name
+        from {owner}.dictionary_sys_tab
+        where module is not null
+          {module_filter}
+          and (table_name is not null or lu_name is not null)
+        """,
+        f"""
+        select upper(module), table_name, null as lu_name
+        from {owner}.dictionary_sys_tab
+        where module is not null
+          {module_filter}
+          and table_name is not null
+        """,
+        f"""
+        select upper(module), table_name, null as lu_name
+        from {owner}.dictionary_sys_lu
+        where module is not null
+          {module_filter}
+          and table_name is not null
+        """,
     ]
-    with _connect(endpoint) as conn:
-        last_error: Exception | None = None
-        for source, sql in queries:
-            try:
-                rows = _run_component_query(conn, sql)
-            except Exception as exc:
-                last_error = exc
-                LOG.info("Component query via %s failed: %s", source, exc)
+    last_error: Exception | None = None
+    for sql in queries:
+        try:
+            rows = _run_component_query(conn, sql, binds)
+        except Exception as exc:
+            last_error = exc
+            LOG.info("Entity dictionary query failed: %s", exc)
+            continue
+        out: list[tuple[str, str]] = []
+        for row in rows:
+            if not row or not row[0]:
                 continue
-            components = [
-                {"name": str(row[0]), "tableCount": int(row[1] or 0)}
-                for row in rows
-                if row and row[0]
-            ]
-            if components:
-                return {
-                    "schema": owner,
-                    "source": source,
-                    "components": components,
-                    "message": f"Loaded {len(components)} component(s) from {source}.",
-                }
-        detail = f" Last error: {last_error}" if last_error else ""
-        raise ValueError(
-            "Could not load IFS components from dictionary metadata "
-            f"(tried dictionary_sys_tab / dictionary_sys_lu_tab / module_tab).{detail}"
+            module = str(row[0]).strip().upper()
+            for value in (row[1], row[2] if len(row) > 2 else None):
+                if value:
+                    out.append((module, str(value).strip()))
+        if out:
+            return out
+    if last_error:
+        raise ValueError(f"Could not read IFS Entity dictionary metadata. Last error: {last_error}")
+    return []
+
+
+def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
+    """Load IFS components with counts of Rowkey-activated Entity base tables."""
+    owner = _quote_ident(schema)
+    with _connect(endpoint) as conn:
+        activated = _rowkey_activated_tables(conn, owner)
+        existing = set()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            select table_name
+            from all_tables
+            where owner = :owner
+            """,
+            {"owner": owner},
         )
+        existing = {str(row[0]).upper() for row in cur.fetchall() if row and row[0]}
+
+        try:
+            entity_rows = _dictionary_entity_rows(conn, owner)
+        except ValueError:
+            # Fall back to module list only if dictionary is unavailable.
+            cur.execute(
+                f"""
+                select upper(module)
+                from {owner}.module_tab
+                where module is not null
+                order by 1
+                """
+            )
+            components = [{"name": str(row[0]), "tableCount": 0} for row in cur.fetchall() if row and row[0]]
+            return {
+                "schema": owner,
+                "source": "module_tab",
+                "components": components,
+                "rowkeyActivatedTables": len(activated),
+                "message": (
+                    f"Loaded {len(components)} component(s) from module_tab. "
+                    "Entity dictionary was unavailable, so Rowkey-activated counts are 0."
+                ),
+            }
+
+        counts: dict[str, set[str]] = {}
+        for module, raw_name in entity_rows:
+            matched = _component_name_variants(raw_name) & existing & activated
+            if not matched:
+                continue
+            bucket = counts.setdefault(module, set())
+            bucket.update(matched)
+
+        components = [
+            {"name": name, "tableCount": len(tables)}
+            for name, tables in sorted(counts.items())
+        ]
+        # Include modules that exist in dictionary but have zero activated tables, for selection UX.
+        all_modules = sorted({module for module, _ in entity_rows})
+        known = {item["name"] for item in components}
+        for module in all_modules:
+            if module not in known:
+                components.append({"name": module, "tableCount": 0})
+        components.sort(key=lambda item: item["name"])
+
+        return {
+            "schema": owner,
+            "source": "entity-dictionary+rowkey",
+            "components": components,
+            "rowkeyActivatedTables": len(activated),
+            "message": (
+                f"Loaded {len(components)} component(s). "
+                f"Counts are Entity Base Tables with Rowkey Activated "
+                f"({len(activated)} activated table(s) in {owner})."
+            ),
+        }
 
 
 def _camel_to_snake(name: str) -> str:
@@ -678,6 +761,7 @@ def list_component_tables(
     schema: str,
     component: str | list[str],
 ) -> dict[str, Any]:
+    """Load Entity Base Tables with Rowkey Activated for the selected IFS components."""
     owner = _quote_ident(schema)
     if isinstance(component, str):
         modules = [(component or "").strip().upper()]
@@ -690,52 +774,13 @@ def list_component_tables(
             "dictionaryNames": 0,
             "matchedTables": 0,
             "schemaTableCount": 0,
+            "rowkeyActivatedTables": 0,
             "components": [],
             "message": "No components selected.",
         }
 
-    batch_size = 500
-    dictionary_names: set[str] = set()
     with _connect(endpoint) as conn:
-        for start in range(0, len(modules), batch_size):
-            batch = modules[start : start + batch_size]
-            binds = {f"m{i}": value for i, value in enumerate(batch)}
-            placeholders = ", ".join(f":m{i}" for i in range(len(batch)))
-            # Keep original casing — upper() in SQL destroys CamelCase needed for LU→table mapping.
-            dict_queries = [
-                f"""
-                select table_name, null as lu_name
-                from {owner}.dictionary_sys_tab
-                where upper(module) in ({placeholders})
-                  and table_name is not null
-                """,
-                f"""
-                select table_name, lu_name
-                from {owner}.dictionary_sys_lu_tab
-                where upper(module) in ({placeholders})
-                  and (table_name is not null or lu_name is not null)
-                """,
-                f"""
-                select table_name, null as lu_name
-                from {owner}.dictionary_sys_lu_tab
-                where upper(module) in ({placeholders})
-                  and table_name is not null
-                """,
-            ]
-            for sql in dict_queries:
-                try:
-                    rows = _run_component_query(conn, sql, binds)
-                except Exception as exc:
-                    LOG.info("Component table query failed: %s", exc)
-                    continue
-                for row in rows:
-                    if not row:
-                        continue
-                    if row[0]:
-                        dictionary_names.add(str(row[0]).strip())
-                    if len(row) > 1 and row[1]:
-                        dictionary_names.add(str(row[1]).strip())
-
+        activated = _rowkey_activated_tables(conn, owner)
         cur = conn.cursor()
         cur.execute(
             """
@@ -745,47 +790,41 @@ def list_component_tables(
             """,
             {"owner": owner},
         )
-        existing = {str(row[0]).upper() for row in cur.fetchall()}
+        existing = {str(row[0]).upper() for row in cur.fetchall() if row and row[0]}
         schema_table_count = len(existing)
 
-        if not dictionary_names:
-            return {
-                "tables": [],
-                "dictionaryNames": 0,
-                "matchedTables": 0,
-                "schemaTableCount": schema_table_count,
-                "components": modules,
-                "message": (
-                    "No dictionary table names found for the selected components on this source schema."
-                ),
-            }
+        entity_rows = _dictionary_entity_rows(conn, owner, modules)
+        dictionary_names = {raw_name for _, raw_name in entity_rows}
 
-        expanded: set[str] = set()
-        for name in dictionary_names:
-            expanded.update(_component_name_variants(name))
-        matched = sorted(name for name in expanded if name in existing)
+        matched: set[str] = set()
+        for _, raw_name in entity_rows:
+            matched.update(_component_name_variants(raw_name) & existing & activated)
 
+        tables = sorted(matched)
         message = (
-            f"Matched {len(matched)} physical table(s) in {owner} "
-            f"(schema has {schema_table_count} table(s) total) "
-            f"from {len(dictionary_names)} dictionary name(s) "
-            f"across {len(modules)} component(s)."
+            f"Loaded {len(tables)} Entity Base Table(s) with Rowkey Activated "
+            f"for {len(modules)} component(s) "
+            f"({len(dictionary_names)} dictionary name(s); "
+            f"{len(activated)} rowkey-activated table(s) in {owner}; "
+            f"schema has {schema_table_count} table(s) total)."
         )
-        if schema_table_count <= 50 and len(modules) > 5:
+        if not tables and dictionary_names:
+            message += (
+                " No selected-component entities matched a physical base table with Rowkey Activated. "
+                "In IFS Entity page, Rowkey must show Activated = Yes."
+            )
+        elif schema_table_count <= 50 and len(modules) > 5:
             message += (
                 " Source schema looks nearly empty — components/tables always load from Source, "
-                "not Target. Keep CFG as Source and point only Target at the new environment."
+                "not Target."
             )
-        elif len(matched) <= 20 and len(dictionary_names) > 50:
-            message += (
-                " Few dictionary names matched physical tables. "
-                "Confirm Source is CFG and schema IFSAPP."
-            )
+
         return {
-            "tables": matched,
+            "tables": tables,
             "dictionaryNames": len(dictionary_names),
-            "matchedTables": len(matched),
+            "matchedTables": len(tables),
             "schemaTableCount": schema_table_count,
+            "rowkeyActivatedTables": len(activated),
             "components": modules,
             "message": message,
         }
