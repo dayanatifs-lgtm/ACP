@@ -603,10 +603,33 @@ def _rowkey_column_tables(conn, owner: str) -> tuple[set[str], set[str]]:
     return activated, present
 
 
+def _ifs_client_to_db_name(client_name: str) -> str:
+    """Mirror Dictionary_SYS.Clientnametodbname_ from fndbas Dictionary.plsql."""
+    text = client_name or ""
+    if not text:
+        return ""
+    leading = len(text) - len(text.lstrip("_"))
+    temp = ""
+    for char in text[leading:]:
+        if "A" <= char <= "Z" and temp:
+            temp = f"{temp}_{char}"
+        else:
+            temp = f"{temp}{char}"
+    result = temp.upper().lstrip("_")
+    if leading in (1, 2):
+        return f"{result}__"
+    return result
+
+
 def _dictionary_entity_rows(
     conn, owner: str, modules: list[str] | None = None
 ) -> list[tuple[str, str, str | None]]:
-    """Return (MODULE, lu_name, table_name) rows from IFS Entity dictionary sources."""
+    """Return (MODULE, lu_name, base_table) using the same sources as IFS Entity page.
+
+    Core reference (fndbas Dictionary.views):
+      Dictionary_Sys_Lu exposes Base_Table via Dictionary_SYS.Get_Base_Table_Name
+      and Enabled_Rowkey via Database_SYS.Is_Rowkey_Enabled.
+    """
     module_filter = ""
     binds: dict[str, Any] = {}
     if modules:
@@ -614,62 +637,74 @@ def _dictionary_entity_rows(
         placeholders = ", ".join(f":m{i}" for i in range(len(modules)))
         module_filter = f" and upper(module) in ({placeholders}) "
 
+    # Prefer the Entity dictionary views/functions from core25R1 fndbas.
     queries = [
-        # Best: resolve Base Table the same way Entity page does.
-        f"""
-        select upper(module),
-               lu_name,
-               nvl({owner}.dictionary_sys.get_base_table_name(lu_name), table_name) as base_table
-        from {owner}.dictionary_sys_lu_tab
-        where module is not null
-          {module_filter}
-          and lu_name is not null
-        """,
-        f"""
-        select upper(module),
-               lu_name,
-               nvl({owner}.dictionary_sys.get_base_table_name(lu_name), table_name) as base_table
-        from {owner}.dictionary_sys_tab
-        where module is not null
-          {module_filter}
-          and lu_name is not null
-        """,
-        f"""
-        select upper(module), lu_name, table_name
-        from {owner}.dictionary_sys_lu_tab
-        where module is not null
-          {module_filter}
-          and (table_name is not null or lu_name is not null)
-        """,
-        f"""
-        select upper(module), lu_name, table_name
-        from {owner}.dictionary_sys_tab
-        where module is not null
-          {module_filter}
-          and (table_name is not null or lu_name is not null)
-        """,
-        f"""
-        select upper(module), null as lu_name, table_name
-        from {owner}.dictionary_sys_tab
-        where module is not null
-          {module_filter}
-          and table_name is not null
-        """,
-        f"""
-        select upper(module), lu_name, table_name
-        from {owner}.dictionary_sys_lu
-        where module is not null
-          {module_filter}
-          and (table_name is not null or lu_name is not null)
-        """,
+        (
+            "dictionary_sys_lu+enabled_rowkey",
+            f"""
+            select upper(module), lu_name, base_table
+            from {owner}.dictionary_sys_lu
+            where module is not null
+              {module_filter}
+              and base_table is not null
+              and enabled_rowkey = 'TRUE'
+            """,
+        ),
+        (
+            "dictionary_sys_lu_active+enabled_rowkey",
+            f"""
+            select upper(module), lu_name, base_table
+            from {owner}.dictionary_sys_lu_active
+            where module is not null
+              {module_filter}
+              and base_table is not null
+              and enabled_rowkey = 'TRUE'
+            """,
+        ),
+        (
+            "dictionary_sys_tab+Get_Base_Table_Name+Is_Rowkey_Enabled",
+            f"""
+            select upper(module),
+                   lu_name,
+                   nvl(
+                     {owner}.dictionary_sys.get_base_table_name(lu_name),
+                     table_name
+                   ) as base_table
+            from {owner}.dictionary_sys_tab
+            where module is not null
+              {module_filter}
+              and lu_name is not null
+              and {owner}.database_sys.is_rowkey_enabled(lu_name) = 'TRUE'
+            """,
+        ),
+        (
+            "dictionary_sys_tab+table_name",
+            f"""
+            select upper(module), lu_name, table_name
+            from {owner}.dictionary_sys_tab
+            where module is not null
+              {module_filter}
+              and table_name is not null
+            """,
+        ),
+        (
+            "dictionary_sys_lu_all",
+            f"""
+            select upper(module), lu_name, base_table
+            from {owner}.dictionary_sys_lu
+            where module is not null
+              {module_filter}
+              and base_table is not null
+            """,
+        ),
     ]
     last_error: Exception | None = None
-    for sql in queries:
+    for source, sql in queries:
         try:
             rows = _run_component_query(conn, sql, binds)
         except Exception as exc:
             last_error = exc
-            LOG.info("Entity dictionary query failed: %s", exc)
+            LOG.info("Entity dictionary query via %s failed: %s", source, exc)
             continue
         out: list[tuple[str, str, str | None]] = []
         for row in rows:
@@ -678,10 +713,18 @@ def _dictionary_entity_rows(
             module = str(row[0]).strip().upper()
             lu_name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
             table_name = str(row[2]).strip() if len(row) > 2 and row[2] else None
+            if table_name:
+                table_name = table_name.upper()
             if not lu_name and not table_name:
                 continue
+            # If dictionary only gave LU name, apply IFS Clientnametodbname_ + _TAB.
+            if not table_name and lu_name:
+                converted = _ifs_client_to_db_name(lu_name)
+                if converted:
+                    table_name = f"{converted}_TAB"
             out.append((module, lu_name or (table_name or ""), table_name))
         if out:
+            LOG.info("Entity dictionary loaded via %s (%s row(s))", source, len(out))
             return out
     if last_error:
         raise ValueError(f"Could not read IFS Entity dictionary metadata. Last error: {last_error}")
@@ -698,13 +741,23 @@ def _match_entity_base_tables(
     strict_counts: dict[str, set[str]] = {}
     present_counts: dict[str, set[str]] = {}
     physical_counts: dict[str, set[str]] = {}
+    dictionary_counts: dict[str, set[str]] = {}
     for module, lu_name, table_name in entity_rows:
         candidates: set[str] = set()
         if table_name:
             candidates.update(_component_name_variants(table_name))
+            candidates.add(table_name.upper())
         if lu_name:
             candidates.update(_component_name_variants(lu_name))
+            converted = _ifs_client_to_db_name(lu_name)
+            if converted:
+                candidates.add(f"{converted}_TAB")
         physical = candidates & existing
+        # Trust Dictionary_SYS base table names even when Source user cannot see
+        # them in all_tables (common for IFSINFO / readonly accounts).
+        if not physical and table_name and table_name.upper().endswith(("_TAB", "_CFT", "_CLT")):
+            physical = {table_name.upper()}
+            dictionary_counts.setdefault(module, set()).update(physical)
         if not physical:
             continue
         physical_counts.setdefault(module, set()).update(physical)
@@ -718,8 +771,11 @@ def _match_entity_base_tables(
     strict_total = sum(len(v) for v in strict_counts.values())
     present_total = sum(len(v) for v in present_counts.values())
     physical_total = sum(len(v) for v in physical_counts.values())
-    # Prefer strict activation, then ROWKEY-present, then any matched Entity base table.
-    # The last fallback covers Source users who cannot see ROWKEY in all_tab_columns.
+    dictionary_total = sum(len(v) for v in dictionary_counts.values())
+    # Rows from dictionary_sys_lu with enabled_rowkey='TRUE' are already filtered by IFS.
+    # Prefer those base tables when all_tab_columns visibility is limited.
+    if physical_total > 0 and strict_total == 0 and present_total == 0:
+        return physical_counts, "dictionary-base-table"
     if strict_total == 0 and present_total > 0:
         return present_counts, "rowkey-present"
     if strict_total < max(10, present_total // 20) and present_total >= 50:
@@ -728,6 +784,8 @@ def _match_entity_base_tables(
         return physical_counts, "entity-base-table"
     if strict_total > 0:
         return strict_counts, "rowkey-activated"
+    if dictionary_total > 0:
+        return dictionary_counts, "dictionary-base-table"
     return physical_counts, "entity-base-table"
 
 
@@ -790,6 +848,7 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
             "rowkey-present": "Entity base tables with a ROWKEY column",
             "rowkey-present-fallback": "Entity base tables with a ROWKEY column",
             "entity-base-table": "Entity base tables (physical match; ROWKEY metadata not visible)",
+            "dictionary-base-table": "Entity dictionary base tables (Dictionary_Sys_Lu / enabled_rowkey)",
         }
         mode_label = mode_labels.get(match_mode, match_mode)
         non_zero = sum(1 for item in components if item["tableCount"] > 0)
@@ -902,8 +961,9 @@ def _component_name_variants(name: str) -> set[str]:
     bases = {
         raw.upper().replace("-", "_").replace(" ", "_"),
         _camel_to_snake(raw),
+        _ifs_client_to_db_name(raw),
     }
-    suffixes = ("_TAB", "_VRT", "_ALL", "_CFP", "_CLP", "_TMP")
+    suffixes = ("_TAB", "_VRT", "_ALL", "_CFP", "_CLP", "_TMP", "_CFT", "_CLT")
     variants: set[str] = set()
     for base in bases:
         if not base:
