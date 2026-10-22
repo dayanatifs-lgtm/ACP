@@ -142,7 +142,12 @@ def resolve_api_requirement(method: str, path: str) -> tuple[str, str] | None:
 
     if path == "/api/db-sync/test":
         return ("db_sync", "view")
-    if path in {"/api/db-sync/schemas", "/api/db-sync/tables", "/api/db-sync/components"}:
+    if path in {
+        "/api/db-sync/schemas",
+        "/api/db-sync/tables",
+        "/api/db-sync/components",
+        "/api/db-sync/component-debug",
+    }:
         return ("db_sync", "view")
     if path == "/api/db-sync/compare":
         return ("db_sync", "compare")

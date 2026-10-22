@@ -68,6 +68,7 @@ from .db_sync import (
     compare_tables,
     ensure_thick_mode,
     get_status as db_sync_status,
+    debug_component_tables as db_debug_component_tables,
     list_component_tables as db_list_component_tables,
     list_components as db_list_components,
     list_schemas as db_list_schemas,
@@ -1452,6 +1453,27 @@ def api_db_sync_components(body: DbSyncSchemaBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Schema is required")
     try:
         return db_list_components(_oracle_endpoint(body.endpoint), body.owner_schema)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/db-sync/component-debug")
+def api_db_sync_component_debug(body: DbSyncSchemaBody) -> dict[str, Any]:
+    if not body.owner_schema:
+        raise HTTPException(status_code=400, detail="Schema is required")
+    component = (body.component or "").strip()
+    if not component and body.components:
+        component = str(body.components[0] or "").strip()
+    if not component:
+        raise HTTPException(status_code=400, detail="Component is required")
+    try:
+        return db_debug_component_tables(
+            _oracle_endpoint(body.endpoint),
+            body.owner_schema,
+            component,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

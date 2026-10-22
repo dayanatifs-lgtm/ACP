@@ -697,6 +697,7 @@ def _match_entity_base_tables(
     """Map dictionary entities to physical tables; prefer strict Rowkey Activated."""
     strict_counts: dict[str, set[str]] = {}
     present_counts: dict[str, set[str]] = {}
+    physical_counts: dict[str, set[str]] = {}
     for module, lu_name, table_name in entity_rows:
         candidates: set[str] = set()
         if table_name:
@@ -706,6 +707,7 @@ def _match_entity_base_tables(
         physical = candidates & existing
         if not physical:
             continue
+        physical_counts.setdefault(module, set()).update(physical)
         present_hits = physical & rowkey_present
         activated_hits = physical & activated
         if present_hits:
@@ -715,13 +717,18 @@ def _match_entity_base_tables(
 
     strict_total = sum(len(v) for v in strict_counts.values())
     present_total = sum(len(v) for v in present_counts.values())
-    # If strict activation finds almost nothing but Entity-capable ROWKEY tables exist,
-    # use ROWKEY-present matching (matches IFS Cloud Entity "Activated" in practice).
+    physical_total = sum(len(v) for v in physical_counts.values())
+    # Prefer strict activation, then ROWKEY-present, then any matched Entity base table.
+    # The last fallback covers Source users who cannot see ROWKEY in all_tab_columns.
     if strict_total == 0 and present_total > 0:
         return present_counts, "rowkey-present"
     if strict_total < max(10, present_total // 20) and present_total >= 50:
         return present_counts, "rowkey-present-fallback"
-    return strict_counts, "rowkey-activated"
+    if strict_total == 0 and present_total == 0 and physical_total > 0:
+        return physical_counts, "entity-base-table"
+    if strict_total > 0:
+        return strict_counts, "rowkey-activated"
+    return physical_counts, "entity-base-table"
 
 
 def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
@@ -778,10 +785,19 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
                 components.append({"name": module, "tableCount": 0})
         components.sort(key=lambda item: item["name"])
 
-        mode_label = (
-            "Rowkey Activated (NOT NULL / SYS_GUID default)"
-            if match_mode == "rowkey-activated"
-            else "Entity base tables that have a ROWKEY column (IFS Cloud Entity Activated)"
+        mode_labels = {
+            "rowkey-activated": "Rowkey Activated (NOT NULL / SYS_GUID default)",
+            "rowkey-present": "Entity base tables with a ROWKEY column",
+            "rowkey-present-fallback": "Entity base tables with a ROWKEY column",
+            "entity-base-table": "Entity base tables (physical match; ROWKEY metadata not visible)",
+        }
+        mode_label = mode_labels.get(match_mode, match_mode)
+        non_zero = sum(1 for item in components if item["tableCount"] > 0)
+        sample = next((item for item in components if item["name"] == "CRM"), None)
+        sample_txt = (
+            f" CRM sample count={sample['tableCount']}."
+            if sample is not None
+            else ""
         )
         return {
             "schema": owner,
@@ -789,10 +805,80 @@ def list_components(endpoint: OracleEndpoint, schema: str) -> dict[str, Any]:
             "components": components,
             "rowkeyActivatedTables": len(activated),
             "rowkeyPresentTables": len(rowkey_present),
+            "schemaTableCount": len(existing),
+            "entityRowCount": len(entity_rows),
+            "componentsWithTables": non_zero,
             "matchMode": match_mode,
             "message": (
-                f"Loaded {len(components)} component(s). Counts are {mode_label}. "
-                f"Strict activated={len(activated)}, ROWKEY present={len(rowkey_present)} in {owner}."
+                f"Loaded {len(components)} component(s); {non_zero} have tables. "
+                f"Counts are {mode_label}. "
+                f"Schema tables={len(existing)}, entity rows={len(entity_rows)}, "
+                f"strict activated={len(activated)}, ROWKEY present={len(rowkey_present)} "
+                f"in {owner}.{sample_txt}"
+            ),
+        }
+
+
+def debug_component_tables(
+    endpoint: OracleEndpoint, schema: str, component: str
+) -> dict[str, Any]:
+    """Diagnostic details for one IFS component (why counts may be zero)."""
+    owner = _quote_ident(schema)
+    module = (component or "").strip().upper()
+    if not module:
+        raise ValueError("Component is required")
+    with _connect(endpoint) as conn:
+        activated, rowkey_present = _rowkey_column_tables(conn, owner)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            select table_name
+            from all_tables
+            where owner = :owner
+            """,
+            {"owner": owner},
+        )
+        existing = {str(row[0]).upper() for row in cur.fetchall() if row and row[0]}
+        entity_rows = [row for row in _dictionary_entity_rows(conn, owner, [module]) if row[0] == module]
+        samples = []
+        physical_all: set[str] = set()
+        for _, lu_name, table_name in entity_rows[:25]:
+            candidates: set[str] = set()
+            if table_name:
+                candidates.update(_component_name_variants(table_name))
+            if lu_name:
+                candidates.update(_component_name_variants(lu_name))
+            physical = sorted(candidates & existing)
+            physical_all.update(physical)
+            samples.append(
+                {
+                    "luName": lu_name,
+                    "tableName": table_name,
+                    "variants": sorted(candidates)[:8],
+                    "physicalMatches": physical[:8],
+                    "rowkeyPresent": bool(set(physical) & rowkey_present),
+                    "rowkeyActivated": bool(set(physical) & activated),
+                }
+            )
+        counts, match_mode = _match_entity_base_tables(
+            entity_rows, existing, activated, rowkey_present
+        )
+        return {
+            "schema": owner,
+            "component": module,
+            "matchMode": match_mode,
+            "entityRowCount": len(entity_rows),
+            "schemaTableCount": len(existing),
+            "rowkeyActivatedTables": len(activated),
+            "rowkeyPresentTables": len(rowkey_present),
+            "matchedTables": sorted(counts.get(module, set()))[:50],
+            "matchedCount": len(counts.get(module, set())),
+            "physicalMatchCount": len(physical_all),
+            "samples": samples,
+            "message": (
+                f"{module}: {len(entity_rows)} entity row(s), "
+                f"{len(physical_all)} physical match(es), "
+                f"{len(counts.get(module, set()))} selected via {match_mode}."
             ),
         }
 

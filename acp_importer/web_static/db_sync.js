@@ -302,6 +302,7 @@ function render() {
       <label>Schema <select id="schema">${schemaOptions}</select></label>
       <div class="buttons">
         <button type="button" class="secondary" id="load-components" ${status.running || !form.schema ? "disabled" : ""}>Load components</button>
+        <button type="button" class="secondary" id="diagnose-component" ${status.running || !form.schema || selectedComponents.size !== 1 ? "disabled" : ""}>Diagnose selected component</button>
         <button type="button" class="secondary" id="load-tables" ${status.running || !form.schema ? "disabled" : ""}>Load tables</button>
         <button type="button" class="secondary" id="compare" ${status.running || !selected.size ? "disabled" : ""}>Compare selected</button>
       </div>
@@ -332,6 +333,8 @@ function render() {
   });
   document.getElementById("load-schemas").onclick = loadSchemas;
   document.getElementById("load-components").onclick = loadComponents;
+  const diagnoseBtn = document.getElementById("diagnose-component");
+  if (diagnoseBtn) diagnoseBtn.onclick = diagnoseComponent;
   document.getElementById("load-tables").onclick = loadTables;
   document.getElementById("compare").onclick = compareSelected;
   document.getElementById("start-sync").onclick = () => startSync(false);
@@ -537,10 +540,55 @@ async function loadComponents() {
     tables = [];
     selected = new Set();
     tableSearch = "";
-    info = `${result.message || `Loaded ${components.length} component(s).`} All selected — uncheck ones to skip, then Load tables.`;
+    info = `${result.message || `Loaded ${components.length} component(s).`} Uncheck ones to skip, then Load tables.`;
   } catch (e) {
     components = [];
     selectedComponents.clear();
+    error = e.message;
+  }
+  render();
+}
+
+async function diagnoseComponent() {
+  error = "";
+  info = "";
+  readForm();
+  const chosen = [...selectedComponents];
+  if (!form.schema) {
+    error = "Select a schema first";
+    render();
+    return;
+  }
+  if (chosen.length !== 1) {
+    error = "Select exactly one component (e.g. only CRM), then Diagnose.";
+    render();
+    return;
+  }
+  try {
+    const result = await api("/api/db-sync/component-debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        endpoint: endpoint("source"),
+        schema: form.schema,
+        component: chosen[0],
+      }),
+    });
+    const sample = (result.samples || []).slice(0, 3).map(row => {
+      const phys = (row.physicalMatches || []).join(", ") || "none";
+      return `${row.luName || "?"} / ${row.tableName || "?"} -> ${phys}`;
+    }).join(" | ");
+    info = `${result.message || "Diagnose complete."} Samples: ${sample || "n/a"}`;
+    if ((result.matchedCount || 0) === 0) {
+      error = (
+        `${chosen[0]} matched 0 tables (entity rows=${result.entityRowCount || 0}, ` +
+        `physical=${result.physicalMatchCount || 0}, schema tables=${result.schemaTableCount || 0}, ` +
+        `ROWKEY present=${result.rowkeyPresentTables || 0}). ` +
+        `If entity rows>0 but physical=0, dictionary names are not mapping to all_tables. ` +
+        `Share IFS core/dictionary package names if you can.`
+      );
+    }
+  } catch (e) {
     error = e.message;
   }
   render();
